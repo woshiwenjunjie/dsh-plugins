@@ -37,22 +37,17 @@ dsh-plugins/
 │       └── package.json      # 版本、市场元数据、dsh.bundle / dsh.client
 ├── scripts/check.mjs         # 全仓库校验（语法 + 每个插件的冒烟测试）
 ├── templates/plugin/         # 新插件骨架
-├── docs/                     # 插件开发与发布指南 + ci-workflow.yml（CI 工作流）
+├── docs/                     # 插件开发与发布指南
+└── .github/workflows/ci.yml  # CI：push / PR 在 Node 22、24 上跑校验
 ```
 
-## 启用 CI
+## CI
 
-`.github/workflows/` 下的文件需要带 `workflow` scope 的 GitHub token 才能推送，本仓库先把它放在
-`docs/ci-workflow.yml`。启用只要三步：
+每次 push 到 `main` 或开 PR，GitHub Actions 会在 Node 22 与 24 上跑 `node scripts/check.mjs`
+（包结构 + `client.js` 语法 + 每个插件的冒烟测试），不通过视为红灯。工作流见
+[.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
-```bash
-gh auth refresh -s workflow          # 或换成有 workflow 权限的 token
-mkdir -p .github/workflows
-cp docs/ci-workflow.yml .github/workflows/ci.yml
-git add .github/workflows/ci.yml && git commit -m "ci: 启用校验工作流" && git push
-```
-
-之后每次 push / PR 会在 Node 22 与 24 上跑 `node scripts/check.mjs`。
+> 推送 `.github/workflows/` 需要 GitHub token 带 `workflow` scope（`gh auth refresh -s workflow`）。
 
 ## 质量基线
 

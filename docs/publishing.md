@@ -99,10 +99,11 @@ npm publish --access public
 
 ## 7. 自动化（可选）
 
-CI 工作流放在 `docs/ci-workflow.yml`（推送 `.github/workflows/` 需要带 `workflow` scope 的 token，
-启用步骤见仓库 README）；启用后每次 push/PR 跑 `node scripts/check.mjs`。
+`.github/workflows/ci.yml` 已在每次 push / PR 跑 `node scripts/check.mjs`（Node 22/24 两个矩阵）。
 如果之后要自动发布，建议：
 
 - 只在打 tag 时触发，且 `npm publish` 用 granular token（权限最小化）；
 - 发布前强制跑 `scripts/check.mjs`；
 - 给插件加 `prepublishOnly` 脚本做最后一次校验。
+
+> 推送 `.github/workflows/` 需要 token 带 `workflow` scope：`gh auth refresh -s workflow`。
