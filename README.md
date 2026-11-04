@@ -9,7 +9,7 @@
 
 | 插件 | 说明 | 版本 | 文档 |
 |---|---|---|---|
-| **dsh-sticky-notes** | 左侧便签栏：随手记录、置顶、搜索（含归档）、备份与恢复、5 秒撤销；数据只存本机 | `0.1.5` | [README](plugins/dsh-sticky-notes/README.md) · [CHANGELOG](plugins/dsh-sticky-notes/CHANGELOG.md) |
+| **dsh-sticky-notes** | 左侧便签栏：随手记录、置顶、搜索（含归档）、按会话查看、备份与恢复、5 秒撤销；数据只存本机 | `0.1.6` | [README](plugins/dsh-sticky-notes/README.md) · [CHANGELOG](plugins/dsh-sticky-notes/CHANGELOG.md) |
 
 ![dsh-sticky-notes](plugins/dsh-sticky-notes/docs/light.png)
 

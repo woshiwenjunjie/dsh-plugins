@@ -2,6 +2,34 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.6] - 2026-11-04
+
+主题：**便签知道自己在哪个会话里**。这是只有 DSH 插件才做得到的一件事——别的便签工具拿不到会话上下文。
+
+### 新增
+
+- **新便签记下所在会话**：`sessionId` 落进便签数据，导出/导入一并保留。
+- **「本会话」筛选**：过滤条变成 `全部 / 本会话 / 已归档`，只看在当前会话里写下的便签。
+  切换会话时该视图自动跟着变。
+- **拿不到会话就自动降级**：如果 slot 没送来标准 kit（或版本换代后接口变了），
+  「本会话」标签不出现，便签栏仍是一个纯本地便签工具——不会残一个点了没反应的按钮。
+- 老便签没有 `sessionId`，只出现在「全部」里，**不强制迁移**。
+
+### 实现要点
+
+- slot 注册的组件现在会被转发整套标准 props（`Object.assign({}, slotProps, { locale })`）；
+  之前只取了 `locale`，把 `useSessions` 这类 selector hook 丢掉了。
+- 「当前会话」用官方同一套判据：`useSessions(state => Object.values(state.byId)
+  .find(s => (s.retainedBy.mainView ?? 0) > 0)?.id)`——与 `dsh-client-ui-layout` 的
+  `DocumentTitle` 完全一致（该结论来自读 0.2.1-rc.2 的 client bundle）。
+- hook 顺序稳定：有 kit 时调 kit 的 selector hook，没有时退回 `useState(null)`，
+  两条分支都只占一个 hook 槽位。
+
+### 测试
+
+`test/behavior.mjs` 用模拟 kit（`useSessions` 返回可切换的会话快照）断言：新便签记下当前会话、
+切会话后新便签换 id、切回来自动更新「本会话」视图、计数正确、无 kit 时只有 2 个标签。
+
 ## [0.1.5] - 2026-11-04
 
 主题：**先量再改**。列表最多 500 条，之前每敲一个字都会把整张列表重渲染一遍。
