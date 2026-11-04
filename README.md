@@ -1,5 +1,7 @@
 # dsh-plugins
 
+[![check](https://github.com/woshiwenjunjie/dsh-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/woshiwenjunjie/dsh-plugins/actions/workflows/ci.yml)
+
 我的 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai) Web 插件仓库：一个仓库集中维护多个插件，
 每个插件是一个独立、可发布的 npm 包（DSH bundle），零构建、零运行时依赖。
 
