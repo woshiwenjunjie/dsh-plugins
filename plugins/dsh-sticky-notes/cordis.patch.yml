@@ -1,0 +1,8 @@
+# dsh-sticky-notes 的 bundle patch。
+#
+# 这一行把本包挂进 profile 的配置树：name 解析到 package.json 的 main
+# （lib/index.js，宿主半侧）；package.json 里的 dsh.client 让 Web 端
+# additionally 加载 ./client（lib/client.js，浏览器半侧）。
+- insert:
+    - id: dsh-sticky-notes
+      name: dsh-sticky-notes

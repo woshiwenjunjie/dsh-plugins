@@ -1,0 +1,5 @@
+# bundle 挂载声明：把本包挂进 profile 的配置树。
+# entry 的 id 必须与包名一致、全局唯一，且这一行不要写行尾注释（市场预检按行匹配）。
+- insert:
+    - id: dsh-my-plugin
+      name: dsh-my-plugin

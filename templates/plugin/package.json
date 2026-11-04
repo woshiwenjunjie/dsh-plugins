@@ -1,0 +1,52 @@
+{
+  "name": "dsh-my-plugin",
+  "version": "0.1.0",
+  "description": "一句话说明这个插件做什么。",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "icon.svg",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woshiwenjunjie/dsh-plugins.git",
+    "directory": "plugins/dsh-my-plugin"
+  },
+  "homepage": "https://github.com/woshiwenjunjie/dsh-plugins/tree/main/plugins/dsh-my-plugin",
+  "bugs": {
+    "url": "https://github.com/woshiwenjunjie/dsh-plugins/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "license": "MIT"
+}

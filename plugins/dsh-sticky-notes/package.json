@@ -1,0 +1,68 @@
+{
+  "name": "dsh-sticky-notes",
+  "version": "0.1.0",
+  "description": "DSH Web 左侧便签栏：随手记录、置顶、搜索、归档，数据只存在本机浏览器。",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "icon.svg",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "docs",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "deepseek-harness",
+    "sticky-notes",
+    "notes",
+    "web-ui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woshiwenjunjie/dsh-plugins.git",
+    "directory": "plugins/dsh-sticky-notes"
+  },
+  "homepage": "https://github.com/woshiwenjunjie/dsh-plugins/tree/main/plugins/dsh-sticky-notes",
+  "bugs": {
+    "url": "https://github.com/woshiwenjunjie/dsh-plugins/issues"
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "preview": "node test/preview.mjs",
+    "check": "node ../../scripts/check.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0",
+    "dsh": ">=0.2.0-rc.2 || >=0.2.1-rc.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.1-rc.2": "compatible"
+      }
+    }
+  },
+  "license": "MIT"
+}

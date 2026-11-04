@@ -1,0 +1,20 @@
+{
+  "name": "dsh-plugins",
+  "version": "0.0.0",
+  "private": true,
+  "description": "我的 DSH（DeepSeek Harness）Web 插件仓库：每个插件一个可发布的 bundle 包。",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woshiwenjunjie/dsh-plugins.git"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node scripts/check.mjs",
+    "preview": "node plugins/dsh-sticky-notes/test/preview.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "license": "MIT"
+}
