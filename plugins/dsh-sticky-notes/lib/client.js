@@ -75,18 +75,41 @@
       // 删除后的撤销窗口。
       var UNDO_MS = 5000
 
-      /** 便签配色：卡片左侧的窄色条，配色名只存在数据里，样式由 class 决定。 */
-      var COLOR_IDS = ['amber', 'sky', 'mint', 'rose', 'violet']
+      // 颜色 = 重要程度（2026-11-04 用户拍板）：1 最要紧 → 4 靠后，5「未排」是默认档。
+      // 语义是视图层的固定映射，数据里仍然只存原来的颜色字符串，不新增字段、不碰备份格式。
+      var PRIORITY_LEVELS = [
+        { id: 'rose', level: 1, label: 'priority.1' },
+        { id: 'amber', level: 2, label: 'priority.2' },
+        { id: 'mint', level: 3, label: 'priority.3' },
+        { id: 'sky', level: 4, label: 'priority.4' },
+        { id: 'violet', level: 5, label: 'priority.5' },
+      ]
+      var COLOR_IDS = PRIORITY_LEVELS.map(function (item) {
+        return item.id
+      })
+      // 新便签不再随机取色：默认落在「未排」，系统不替你排优先级。
+      var DEFAULT_COLOR = 'violet'
+
+      function levelOf(colorId) {
+        for (var i = 0; i < PRIORITY_LEVELS.length; i += 1) {
+          if (PRIORITY_LEVELS[i].id === colorId) return PRIORITY_LEVELS[i]
+        }
+        return PRIORITY_LEVELS[PRIORITY_LEVELS.length - 1]
+      }
 
       /**
-       * 色名。颜色本身是唯一的分类通道，所以每个色块都必须有文字名——
-       * 色弱、色盲和读屏用户只能靠这个名字知道「刚才选的是哪一色」。
-       * 名字用颜色名（琥珀/天蓝…），不用语义名（待办/工作…）：语义归用户，产品不写死。
+       * 档位名（最要紧 / 要紧 / 一般 / 靠后 / 未排）。
+       * 颜色不能作为唯一信息通道（WCAG 1.4.1），所以色点、色板、筛选菜单里都同时给数字和文字。
        */
-      function colorName(t, id) {
-        var key = 'color.name.' + id
-        var label = t(key)
-        return !label || label === key ? id : label
+      function priorityName(t, colorId) {
+        var level = levelOf(colorId)
+        var label = t(level.label)
+        return !label || label === level.label ? level.id : label
+      }
+
+      /** 「1 最要紧」这种带数字的完整说法：给 aria-label / title / 色板 / 筛选菜单用。 */
+      function priorityText(t, colorId) {
+        return levelOf(colorId).level + ' ' + priorityName(t, colorId)
       }
 
       function newId() {
@@ -101,7 +124,7 @@
         return {
           id: typeof raw.id === 'string' && raw.id ? raw.id : newId(),
           text: text,
-          color: COLOR_IDS.indexOf(raw.color) === -1 ? 'amber' : raw.color,
+          color: COLOR_IDS.indexOf(raw.color) === -1 ? DEFAULT_COLOR : raw.color,
           pinned: raw.pinned === true,
           archived: raw.archived === true,
           archivedAt: typeof raw.archivedAt === 'number' ? raw.archivedAt : 0,
@@ -351,7 +374,7 @@
       // 只落在 localStorage，不上报。导出 Markdown 时附在末尾，方便用一周后
       // 拿真实数据决定下一步优化顺序（而不是靠直觉）。
       var METRICS_KEY = 'dsh-sticky-notes:metrics:v1'
-      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'import']
+      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'color', 'import']
       var METRIC_LABELS = {
         open: '打开面板',
         create: '新建便签',
@@ -449,16 +472,17 @@
         'note.pinned': '置顶',
         'note.pin': '置顶这条便签',
         'note.unpin': '取消置顶',
-        'note.color': '选择颜色',
-        'color.pick': '选择颜色',
-        'color.current': '颜色：',
-        'color.filter': '按颜色筛选',
-        'color.any': '全部颜色',
-        'color.name.amber': '琥珀',
-        'color.name.sky': '天蓝',
-        'color.name.mint': '薄荷',
-        'color.name.rose': '玫瑰',
-        'color.name.violet': '紫罗兰',
+        'note.color': '选择重要程度',
+        'color.pick': '选择重要程度',
+        'color.current': '重要程度：',
+        'color.filter': '按重要程度筛选',
+        'color.any': '全部',
+        'priority.1': '最要紧',
+        'priority.2': '要紧',
+        'priority.3': '一般',
+        'priority.4': '靠后',
+        'priority.5': '未排',
+        'priority.change': '点击更换',
         'note.delete': '删除这条便签（可撤销）',
         'note.archive': '归档这条便签',
         'note.restore': '恢复这条便签',
@@ -485,6 +509,7 @@
         'metric.unarchive': '恢复归档',
         'metric.export': '导出',
         'metric.search': '搜索',
+        'metric.color': '换色',
         'metric.import': '导入备份',
       }
 
@@ -536,16 +561,17 @@
         'note.pinned': 'Pinned',
         'note.pin': 'Pin this note',
         'note.unpin': 'Unpin this note',
-        'note.color': 'Choose color',
-        'color.pick': 'Choose a color',
-        'color.current': 'Color: ',
-        'color.filter': 'Filter by color',
-        'color.any': 'All colors',
-        'color.name.amber': 'Amber',
-        'color.name.sky': 'Sky',
-        'color.name.mint': 'Mint',
-        'color.name.rose': 'Rose',
-        'color.name.violet': 'Violet',
+        'note.color': 'Choose importance',
+        'color.pick': 'Choose importance',
+        'color.current': 'Importance: ',
+        'color.filter': 'Filter by importance',
+        'color.any': 'All',
+        'priority.1': 'Top',
+        'priority.2': 'High',
+        'priority.3': 'Normal',
+        'priority.4': 'Later',
+        'priority.5': 'Unset',
+        'priority.change': 'click to change',
         'note.delete': 'Delete this note (undoable)',
         'note.archive': 'Archive this note',
         'note.restore': 'Restore this note',
@@ -572,6 +598,7 @@
         'metric.unarchive': 'Restored',
         'metric.export': 'Exports',
         'metric.search': 'Searches',
+        'metric.color': 'Color changes',
         'metric.import': 'Backups restored',
       }
 
@@ -1351,18 +1378,26 @@
                 ),
             archived
               ? null
-              : h('button', {
-                  type: 'button',
-                  className: 'dsn-dot-btn' + (paletteOpen ? ' is-open' : ''),
-                  // 色名写进 aria-label / title：颜色不能是唯一信息通道。
-                  title: t('color.current') + colorName(t, note.color),
-                  'aria-label': t('color.current') + colorName(t, note.color) + '（' + t('note.color') + '）',
-                  'aria-expanded': paletteOpen ? 'true' : 'false',
-                  'aria-haspopup': 'true',
-                  onClick: function () {
-                    onColor(note.id)
+              : h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsn-dot-btn' + (paletteOpen ? ' is-open' : ''),
+                    // 数字 + 文字一起写进 aria-label / title：颜色不能是唯一信息通道。
+                    title: t('color.current') + priorityText(t, note.color),
+                    'aria-label': t('color.current') + priorityText(t, note.color) + '，' + t('priority.change'),
+                    'aria-expanded': paletteOpen ? 'true' : 'false',
+                    'aria-haspopup': 'true',
+                    onClick: function () {
+                      onColor(note.id)
+                    },
                   },
-                }),
+                  h('span', { className: 'dsn-dot' }),
+                  // 「未排」不画数字：没排过就是没排过，不假装它是个优先级。
+                  levelOf(note.color).level < PRIORITY_LEVELS.length
+                    ? h('span', { className: 'dsn-rank', 'aria-hidden': 'true' }, String(levelOf(note.color).level))
+                    : null,
+                ),
             h(
               'button',
               {
@@ -1406,7 +1441,7 @@
             ),
           ),
           // 调色板：内联展开（不做浮层），所以不会被列滚动裁掉、也不用处理定位。
-          // 每个选项都是「色块 + 色名」，选色不用试、读屏也念得出。
+          // 每个选项都是「色块 + 档位数字 + 档位名」，选色不用试、读屏也念得出。
           paletteOpen
             ? h(
                 'div',
@@ -1419,15 +1454,15 @@
                       key: colorId,
                       type: 'button',
                       className: 'dsn-palette-option dsn-c-' + colorId + (current ? ' is-current' : ''),
-                      title: colorName(t, colorId),
-                      'aria-label': colorName(t, colorId),
+                      title: priorityText(t, colorId),
+                      'aria-label': priorityText(t, colorId),
                       'aria-pressed': current ? 'true' : 'false',
                       onClick: function () {
                         if (typeof onPickColor === 'function') onPickColor(note.id, colorId)
                       },
                     },
                     h('span', { className: 'dsn-palette-swatch' }),
-                    h('span', { className: 'dsn-palette-name' }, colorName(t, colorId)),
+                    h('span', { className: 'dsn-palette-name' }, priorityText(t, colorId)),
                   )
                 }),
               )
@@ -1945,7 +1980,7 @@
             var note = {
               id: newId(),
               text: value,
-              color: COLOR_IDS[Math.floor(Math.random() * COLOR_IDS.length)] || 'amber',
+              color: DEFAULT_COLOR,
               pinned: false,
               archived: false,
               archivedAt: 0,
@@ -2031,6 +2066,8 @@
             })
             return { notes: next, open: prev.open }
           })
+          // 先量有没有人真的用颜色，再决定要不要继续加语义。
+          recordMetric('color')
         }, [])
 
         // 点击色点开/关调色板：一次只开一个，再点同一个就收起。
@@ -2554,8 +2591,8 @@
                       'dsn-color-trigger' +
                       (colorFilter ? ' is-active dsn-c-' + colorFilter : '') +
                       (colorMenuOpen ? ' is-open' : ''),
-                    title: colorFilter ? t('color.current') + colorName(t, colorFilter) : t('color.filter'),
-                    'aria-label': colorFilter ? t('color.current') + colorName(t, colorFilter) : t('color.filter'),
+                    title: colorFilter ? t('color.current') + priorityText(t, colorFilter) : t('color.filter'),
+                    'aria-label': colorFilter ? t('color.current') + priorityText(t, colorFilter) : t('color.filter'),
                     'aria-haspopup': 'true',
                     'aria-expanded': colorMenuOpen ? 'true' : 'false',
                     onClick: function () {
@@ -2563,7 +2600,7 @@
                     },
                   },
                   h('span', { className: 'dsn-color-dot' }),
-                  colorFilter ? h('span', { className: 'dsn-color-trigger-name' }, colorName(t, colorFilter)) : null,
+                  colorFilter ? h('span', { className: 'dsn-color-trigger-name' }, priorityText(t, colorFilter)) : null,
                 ),
                 colorMenuOpen
                   ? h(
@@ -2601,7 +2638,7 @@
                             },
                           },
                           h('span', { className: 'dsn-color-item-dot' }),
-                          h('span', { className: 'dsn-color-item-label' }, colorName(t, colorId)),
+                          h('span', { className: 'dsn-color-item-label' }, priorityText(t, colorId)),
                           h('span', { className: 'dsn-color-item-count' }, String(count)),
                         )
                       }),
@@ -2878,7 +2915,7 @@
         '.dsn-list.has-toast{padding-bottom:64px}',
         '.dsn-list::-webkit-scrollbar{width:8px}',
         '.dsn-list::-webkit-scrollbar-thumb{background:rgba(127,127,127,.32);border-radius:4px}',
-        '.dsn-note{--dsn-sticky:#f0b13a;position:relative;border:1px solid var(--dsn-line);border-left:3px solid var(--dsn-sticky);border-radius:11px;background:rgba(127,127,127,.08);padding:7px 8px 4px 16px}',
+        '.dsn-note{--dsn-sticky:#6f52d9;position:relative;border:1px solid var(--dsn-line);border-left:3px solid var(--dsn-sticky);border-radius:11px;background:rgba(127,127,127,.08);padding:7px 8px 4px 16px}',
         // 拖动把手：占住左边缘（色条 + 内边距）那块空隙，平时隐形，hover/聚焦才显形。
         '.dsn-grip{position:absolute;left:1px;top:5px;width:22px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsn-fg-2);opacity:0;cursor:grab;display:grid;place-items:center;transition:opacity .12s ease,background .12s ease}',
         '.dsn-note:hover .dsn-grip,.dsn-note:focus-within .dsn-grip{opacity:.7}',
@@ -2887,11 +2924,18 @@
         '.dsn-grip:active{cursor:grabbing}',
         '.dsn-note.is-dragging{opacity:.45}',
         '.dsn-note.is-drop-target{box-shadow:inset 0 0 0 1px var(--dsn-accent)}',
-        '.dsn-c-amber{--dsn-sticky:#f0b13a}',
-        '.dsn-c-sky{--dsn-sticky:#4f9dff}',
-        '.dsn-c-mint{--dsn-sticky:#3fbd8b}',
-        '.dsn-c-rose{--dsn-sticky:#f4728f}',
-        '.dsn-c-violet{--dsn-sticky:#a58bfa}',
+        // 五色 = 五档重要程度。浅色主题用压深一档的值（原来的亮色在浅底上只有 1.73-2.76:1，
+        // 达不到图形元素 3:1）；深色主题保持亮色那套（4.11-8.27:1）。数据里存的是色名 id，换色值不动数据。
+        '.dsn-c-rose{--dsn-sticky:#c93a5e}',
+        '.dsn-c-amber{--dsn-sticky:#b8780a}',
+        '.dsn-c-mint{--dsn-sticky:#1d8a5b}',
+        '.dsn-c-sky{--dsn-sticky:#1f6fd6}',
+        '.dsn-c-violet{--dsn-sticky:#6f52d9}',
+        'body[data-ds-dark-theme] .dsn-c-rose{--dsn-sticky:#f4728f}',
+        'body[data-ds-dark-theme] .dsn-c-amber{--dsn-sticky:#f0b13a}',
+        'body[data-ds-dark-theme] .dsn-c-mint{--dsn-sticky:#3fbd8b}',
+        'body[data-ds-dark-theme] .dsn-c-sky{--dsn-sticky:#4f9dff}',
+        'body[data-ds-dark-theme] .dsn-c-violet{--dsn-sticky:#a58bfa}',
         '.dsn-note-input{width:100%;border:0;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1.55;resize:none;padding:2px 2px 0;overflow:hidden;display:block}',
         '.dsn-note-input:focus{outline:none}',
         '.dsn-note-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
@@ -2915,10 +2959,12 @@
         '.dsn-source-icon{display:grid;place-items:center;flex:0 0 auto;opacity:.85}',
         '.dsn-source-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
         '.dsn-spacer{flex:1 1 auto}',
-        '.dsn-dot-btn{display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;cursor:pointer;transition:background .12s ease}',
-        '.dsn-dot-btn::after{content:"";width:12px;height:12px;border-radius:50%;background:var(--dsn-sticky);box-shadow:0 0 0 1.5px var(--dsn-ring);transition:transform .12s ease}',
+        '.dsn-dot-btn{display:inline-flex;align-items:center;justify-content:center;gap:3px;min-width:24px;height:24px;padding:0 3px;border:0;border-radius:8px;background:transparent;cursor:pointer;transition:background .12s ease}',
+        '.dsn-dot{width:12px;height:12px;border-radius:50%;background:var(--dsn-sticky);box-shadow:0 0 0 1.5px var(--dsn-ring);transition:transform .12s ease}',
+        '.dsn-rank{font-size:10px;font-weight:650;line-height:1;color:var(--dsn-fg-2);font-variant-numeric:tabular-nums}',
         '.dsn-dot-btn:hover{background:rgba(127,127,127,.16)}',
-        '.dsn-dot-btn:hover::after{transform:scale(1.14)}',
+        '.dsn-dot-btn:hover .dsn-dot{transform:scale(1.14)}',
+        '.dsn-dot-btn:hover .dsn-rank{color:var(--dsn-fg)}',
         '.dsn-dot-btn.is-open{background:rgba(127,127,127,.18)}',
         '.dsn-dot-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
         // 调色板：内联展开在卡片底部（不做浮层），所以不会被列表滚动裁掉，也不用算定位。
@@ -2943,7 +2989,7 @@
         '.dsn-toast-undo:hover{background:rgba(127,127,127,.24)}',
         '.dsn-toast-undo:focus-visible{outline:2px solid var(--dsn-on-accent);outline-offset:1px}',
         '@keyframes dsn-toast-in{from{transform:translateY(6px);opacity:0}to{transform:none;opacity:1}}',
-        '@media (prefers-reduced-motion: reduce){.dsn-panel,.dsn-toast{animation:none}.dsn-tab,.dsn-save,.dsn-dot-btn,.dsn-dot-btn::after{transition:none}}',
+        '@media (prefers-reduced-motion: reduce){.dsn-panel,.dsn-toast{animation:none}.dsn-tab,.dsn-save,.dsn-dot-btn,.dsn-dot{transition:none}}',
       ].join('\n')
 
       // ---------------------------------------------------------------- 插件

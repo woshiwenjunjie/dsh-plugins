@@ -125,6 +125,25 @@ function over(top, bottom) {
 }
 
 const GREY_30 = { r: 127, g: 127, b: 127, a: 0.3 }
+// 卡片底色：面板底上叠 8% 灰（.dsn-note 的 background）。
+const GREY_08 = { r: 127, g: 127, b: 127, a: 0.08 }
+
+// ---------------------------------------------------------------- 插件自己的五色
+//
+// 色条不在 DSH 主题 token 里，是我们自己写死的 hex（浅色压深一套、深色另一套）。
+// 从 lib/client.js 的 CSS 里解析出来，这样改了色值忘改测试就会红，而不是「测试很绿、页面不达标」。
+const clientSource = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+const palette = { light: new Map(), dark: new Map() }
+const colorPattern = /\.dsn-c-([a-z]+)\{--dsn-sticky:(#[0-9a-fA-F]{6})\}/g
+const darkColorPattern = /body\[data-ds-dark-theme\]\s+\.dsn-c-([a-z]+)\{--dsn-sticky:(#[0-9a-fA-F]{6})\}/g
+let colorMatch
+while ((colorMatch = darkColorPattern.exec(clientSource)) !== null) {
+  palette.dark.set(colorMatch[1], colorMatch[2])
+}
+const lightSource = clientSource.replace(/body\[data-ds-dark-theme\][^{]*\{[^}]*\}/g, '')
+while ((colorMatch = colorPattern.exec(lightSource)) !== null) {
+  palette.light.set(colorMatch[1], colorMatch[2])
+}
 
 // 每一行 = 我们 CSS 里真实用到的一对颜色（注释指向用法）。
 const cases = [
@@ -164,6 +183,22 @@ for (const theme of ['light', 'dark']) {
     const ok = ratio >= 4.5
     console.log(`${theme.padEnd(5)} ${'高亮片段文字 / 高亮底色'.padEnd(40)} ${ratio.toFixed(2).padStart(5)}   ${ok ? '✓' : '✗'}`)
     if (!ok) failures.push(`${theme}：高亮片段 = ${ratio.toFixed(3)}（需 ≥ 4.5）`)
+  }
+
+  // 五色色条：颜色现在承载「重要程度」，属于图形元素，按 3:1 算（WCAG 1.4.11）。
+  if (surface) {
+    const cardBg = over(GREY_08, surface)
+    for (const [id, hex] of palette[theme]) {
+      const bar = parseColor(hex)
+      if (!bar) {
+        failures.push(`${theme}：色条 ${id} 的色值解析不了（${hex}）`)
+        continue
+      }
+      const ratio = contrast(bar, cardBg)
+      const ok = ratio >= 3
+      console.log(`${theme.padEnd(5)} ${`色条·${id} / 卡片底`.padEnd(40)} ${ratio.toFixed(2).padStart(5)}   ${ok ? '✓' : '✗'}`)
+      if (!ok) failures.push(`${theme}：色条 ${id} = ${ratio.toFixed(3)}（需 ≥ 3）`)
+    }
   }
 }
 

@@ -1109,16 +1109,21 @@ check('非归档便签都有色点，归档的没有', colorDots().length, 5)
 // 点色点 → 内联调色板，5 个色块都带色名，当前色被标出来
 act(() => colorDots()[0].props.onClick({}))
 check('点色点弹出色板', paletteOptions().length, 5)
-check('色板列出全部色名', paletteOptions().map((el) => flattenText(el.props.children[1])), ['琥珀', '天蓝', '薄荷', '玫瑰', '紫罗兰'])
+check(
+  '色板按重要程度排出 5 档',
+  paletteOptions().map((el) => flattenText(el.props.children[1])),
+  ['1 最要紧', '2 要紧', '3 一般', '4 靠后', '5 未排'],
+)
 check('当前色被标出（只有一个）', paletteOptions().filter((el) => el.props['aria-pressed'] === 'true').length, 1)
 check('当前色的名字对得上', paletteOptions().map((el) => el.props['aria-pressed'])[2], 'true')
-check('色点自己带色名（读屏要知道现在是哪一色）', colorDots()[0].props['aria-label'], '颜色：薄荷（选择颜色）')
+check('色点带档位数字 + 名称（读屏要知道现在是哪一档）', colorDots()[0].props['aria-label'], '重要程度：3 一般，点击更换')
+check('有档位的便签在色点旁显示数字', flattenText(colorDots()[0].props.children), '3')
 
 // 选色：直接落到目标色，不是循环
 const beforeUpdated = storedUpdatedAt('c5')
 act(() => paletteOptions()[3].props.onClick({}))
 advance(300)
-check('选色后便签变成目标色', storedColor('c5'), 'rose')
+check('选色后便签落到目标档', storedColor('c5'), 'sky')
 check('选完色板自动收起', paletteOptions().length, 0)
 check('换色不改 updatedAt（不该把便签顶到最上面）', storedUpdatedAt('c5'), beforeUpdated)
 
@@ -1128,7 +1133,7 @@ check('再次点色点重新打开', paletteOptions().length, 5)
 pressKey({ key: 'Escape' })
 check('Esc 收起色板', paletteOptions().length, 0)
 check('Esc 关色板时面板还在', elements.some((el) => el.props.className === 'dsn-panel'), true)
-check('Esc 关色板不改颜色', storedColor('c5'), 'rose')
+check('Esc 关色板不改颜色', storedColor('c5'), 'sky')
 
 // 搜索框左侧的颜色筛选：菜单带条数（按当前搜索词算、不叠加颜色条件）
 // 上一段改过 c5 的颜色，这里重新挂载回到种子数据。
@@ -1137,13 +1142,13 @@ check('搜索框里有颜色触发器', Boolean(colorTrigger()), true)
 act(() => colorTrigger().props.onClick({}))
 check('颜色菜单里是「全部 + 5 色」', colorMenuItems().length, 6)
 check('「全部颜色」的条数', flattenText(colorMenuItems()[0].props.children[2]), '6')
-check('各色条数按颜色分组', colorMenuItems().slice(1).map((el) => flattenText(el.props.children[2])), ['2', '1', '1', '1', '1'])
+check('各档条数按重要程度分组', colorMenuItems().slice(1).map((el) => flattenText(el.props.children[2])), ['1', '2', '1', '1', '1'])
 
 // 选一个颜色 → 列表只剩这一色，视图芯片同步高亮「全部」
-act(() => colorMenuItems()[1].props.onClick({}))
-check('按颜色筛出琥珀的两条', shownTexts().slice().sort(), ['琥珀的另一个想法', '琥珀的工作想法'].sort())
+act(() => colorMenuItems()[2].props.onClick({}))
+check('按档位筛出「2 要紧」的两条', shownTexts().slice().sort(), ['琥珀的另一个想法', '琥珀的工作想法'].sort())
 check('颜色筛选时「全部」标签高亮', filterTabs()[0].props['aria-selected'], 'true')
-check('颜色触发器带上色名', flattenText(colorTrigger().props.children[1]), '琥珀')
+check('颜色触发器带上档位', flattenText(colorTrigger().props.children[1]), '2 要紧')
 
 // 和 `#标签` 是「且」：琥珀 + `#想法` → 没有交集（不是把两批并起来）
 act(() => searchInput().props.onChange({ target: { value: '#想法' } }))
@@ -1155,11 +1160,11 @@ act(() => colorMenuItems()[0].props.onClick({}))
 check('清掉颜色后按标签筛出两条', shownTexts().slice().sort(), ['#想法 天蓝那条', '#想法 玫瑰那条'].sort())
 act(() => colorTrigger().props.onClick({}))
 check(
-  '有搜索词时各色条数只算命中项',
+  '有搜索词时各档条数只算命中项',
   colorMenuItems().slice(1).map((el) => flattenText(el.props.children[2])),
-  ['0', '1', '0', '1', '0'],
+  ['1', '0', '0', '1', '0'],
 )
-act(() => colorMenuItems()[4].props.onClick({}))
+act(() => colorMenuItems()[1].props.onClick({}))
 check('再按颜色收窄到一条', shownTexts(), ['#想法 玫瑰那条'])
 
 // Esc 逐层退出：先清搜索词，再清颜色筛选，最后才收面板（与 Esc 链的顺序一致）
@@ -1174,11 +1179,31 @@ check('Esc 最后才收面板', elements.some((el) => el.props.className === 'ds
 // 切视图芯片会清掉颜色筛选（否则点「已归档」看起来没反应）
 remount(colorSeed)
 act(() => colorTrigger().props.onClick({}))
-act(() => colorMenuItems()[2].props.onClick({}))
+act(() => colorMenuItems()[4].props.onClick({}))
 check('切视图前颜色筛选生效', cardTexts(), ['#想法 天蓝那条'])
 act(() => filterTabs()[1].props.onClick({}))
 check('切到已归档视图后颜色筛选被清掉', String(colorTrigger().props.className).indexOf('is-active') === -1, true)
 check('已归档视图显示归档便签', cardTexts(), ['紫罗兰的一条（归档）'])
+
+// 默认档：新便签不再随机取色，统一落到「未排」（5），系统不替你排优先级
+storage.delete('dsh-sticky-notes:draft')
+remount([])
+act(() => draftArea().props.onChange({ target: { value: '第一条随手记' } }))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+act(() => draftArea().props.onChange({ target: { value: '第二条随手记' } }))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+advance(300)
+const freshNotes = JSON.parse(storage.get('dsh-sticky-notes:v1')).notes
+check('新便签默认落在「未排」这一档', freshNotes.map((note) => note.color), ['violet', 'violet'])
+check('「未排」的色点旁不显示数字（不假装有优先级）', flattenText(colorDots()[0].props.children), '')
+
+// 换色埋点：P0 要求先能量到「有没有人真的用颜色」
+storage.delete('dsh-sticky-notes:metrics:v1')
+act(() => colorDots()[0].props.onClick({}))
+act(() => paletteOptions()[0].props.onClick({}))
+advance(300)
+const metricsRaw = storage.get('dsh-sticky-notes:metrics:v1')
+check('换色会计一次数', metricsRaw ? JSON.parse(metricsRaw).counters.color : 0, 1)
 
 // ---------------------------------------------------------------- 手动排序
 
@@ -1257,5 +1282,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（具名调色板 + 按色筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
 )
