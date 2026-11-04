@@ -39,6 +39,10 @@ let cursor = 0
 let elements = []
 let dirty = false
 let pendingEffects = []
+// 定时器排队到「渲染提交之后」再跑，贴近浏览器宏任务时序（收起后要等标签挂载完才能还焦点）。
+let timers = new Map()
+let timerSeq = 0
+let focusedElement = null
 
 function createElement(type, rawProps, ...children) {
   const props = Object.assign({}, rawProps || {})
@@ -48,7 +52,14 @@ function createElement(type, rawProps, ...children) {
     if (type.prototype && typeof type.prototype.render === 'function') return new type(props).render()
     return type(props)
   }
-  const element = { type, props }
+  const element = { type, props, style: {}, scrollHeight: 0, setAttribute() {}, appendChild() {}, remove() {} }
+  // 和 React 一样：DOM 元素的 ref 指向元素本身；给个 focus 用来验证焦点归还。
+  if (props.ref && typeof props.ref === 'object') {
+    props.ref.current = element
+    element.focus = () => {
+      focusedElement = element
+    }
+  }
   elements.push(element)
   return element
 }
@@ -114,12 +125,14 @@ const sandbox = {
     innerWidth: 1400,
     setInterval: () => 0,
     clearInterval: () => {},
-    // 立刻执行：让「去抖落盘」在测试里同步发生。
     setTimeout: (fn) => {
-      fn()
-      return 0
+      timerSeq += 1
+      timers.set(timerSeq, fn)
+      return timerSeq
     },
-    clearTimeout: () => {},
+    clearTimeout: (id) => {
+      timers.delete(id)
+    },
     addEventListener: () => {},
     removeEventListener: () => {},
   },
@@ -182,11 +195,17 @@ function renderPass() {
 function flush() {
   let guard = 0
   dirty = true
-  do {
+  while (dirty || timers.size > 0) {
     if (guard++ > 40) throw new Error('渲染次数过多，可能存在无限循环')
     dirty = false
     renderPass()
-  } while (dirty)
+    // 渲染稳定后跑排队的定时器（宏任务），再继续收敛。
+    if (!dirty && timers.size > 0) {
+      const queue = [...timers.values()]
+      timers.clear()
+      for (const fn of queue) fn()
+    }
+  }
 }
 
 function act(mutate) {
@@ -284,6 +303,81 @@ storageFull = false
 act(() => cards()[0].props.onChange({ target: { value: '新想法（又能存了）' } }))
 check('恢复可写后回到已保存', hint() && hint().props.children, '已自动保存到本机')
 
+// ---------------------------------------------------------------- 搜索与焦点
+
+function searchInput() {
+  return elements.find((el) => el.type === 'input' && el.props.className === 'dsn-search-input')
+}
+function closeButton() {
+  return elements.find(
+    (el) => el.type === 'button' && el.props.className === 'dsn-icon-btn' && el.props['aria-label'] === '收起便签栏',
+  )
+}
+
+// 换一套数据重新挂载：搜索框要便签 ≥ 6 条才出现，另外放一条已归档的。
+function remount(nextNotes) {
+  storage.set('dsh-sticky-notes:v1', JSON.stringify({ notes: nextNotes }))
+  storage.set('dsh-sticky-notes:open', '1')
+  hookSlots = []
+  refSlots = []
+  effectSlots = []
+  timers.clear()
+  cursor = 0
+  elements = []
+  focusedElement = null
+  dirty = true
+  flush()
+}
+
+const ARCHIVED_TEXT = '归档的旧念头：验证搜索能跨视图'
+const searchSeed = [
+  { id: 's1', text: '买咖啡豆', color: 'amber', pinned: false, createdAt: now - 6000, updatedAt: now - 6000 },
+  { id: 's2', text: '周五复盘提纲', color: 'sky', pinned: false, createdAt: now - 5000, updatedAt: now - 5000 },
+  { id: 's3', text: '给妈妈打电话', color: 'mint', pinned: false, createdAt: now - 4000, updatedAt: now - 4000 },
+  { id: 's4', text: '读《卡片笔记法》', color: 'rose', pinned: false, createdAt: now - 3000, updatedAt: now - 3000 },
+  { id: 's5', text: '把抽屉宽度做成可拖', color: 'violet', pinned: false, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 's6', text: '周三前交稿', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+  {
+    id: 's7',
+    text: ARCHIVED_TEXT,
+    color: 'mint',
+    pinned: false,
+    archived: true,
+    archivedAt: now - 500,
+    createdAt: now - 7000,
+    updatedAt: now - 7000,
+  },
+]
+remount(searchSeed)
+
+check('便签够多时渲染出搜索框', Boolean(searchInput()), true)
+check('「全部」视图默认不列已归档', cardTexts().indexOf(ARCHIVED_TEXT), -1)
+
+act(() => searchInput().props.onChange({ target: { value: '归档' } }))
+check('搜索能跨视图命中已归档便签', cardTexts(), [ARCHIVED_TEXT])
+check('命中的归档便签带「已归档」标记', elements.some((el) => el.props.className === 'dsn-archived-mark'), true)
+check('归档命中项仍是只读', cards()[0].props.readOnly, true)
+
+act(() => searchInput().props.onChange({ target: { value: '' } }))
+check('清空搜索回到当前视图', cardTexts().length, 6)
+
+// 搜索跨视图，所以标签要同步高亮「全部」，不能出现「已归档标签亮着、结果里却有未归档便签」
+function filterTabs() {
+  return elements.filter((el) => String(el.props.className || '').indexOf('dsn-filter-btn') !== -1)
+}
+act(() => filterTabs()[1].props.onClick())
+check('切到已归档视图', filterTabs()[1].props['aria-selected'], 'true')
+act(() => searchInput().props.onChange({ target: { value: '归档' } }))
+check('搜索时「全部」标签高亮', filterTabs()[0].props['aria-selected'], 'true')
+check('搜索时「已归档」标签不再高亮', filterTabs()[1].props['aria-selected'], 'false')
+check('搜索仍命中归档便签', cardTexts(), [ARCHIVED_TEXT])
+
+// 收起后焦点要还给左边缘标签，键盘用户不会掉到页面开头。
+focusedElement = null
+act(() => closeButton().props.onClick({}))
+check('收起后不再渲染面板', elements.some((el) => el.props.className === 'dsn-panel'), false)
+check('收起后焦点回到左边缘标签', focusedElement && focusedElement.props.className, 'dsn-tab')
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -291,4 +385,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(' - ' + failure)
   process.exit(1)
 }
-console.log('PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示')
+console.log('PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 / 收起还焦点')

@@ -689,6 +689,7 @@
         var saveTimer = useRef(0)
         var undoTimer = useRef(0)
         var panelRef = useRef(null)
+        var tabRef = useRef(null)
         var searchRef = useRef(null)
         // 埋点去抖：同一条便签一次会话里只记一次「编辑」，搜索一次会话只记一次。
         var editedInSession = useRef({})
@@ -765,15 +766,19 @@
         )
 
         var baseList = view === 'archived' ? archivedNotes : activeNotes
+        // 搜索时列表覆盖全部（含归档），标签同步高亮「全部」，否则标签和结果对不上。
+        var activeTab = query.trim() ? 'all' : view
         var filteredNotes = useMemo(
           function () {
             var keyword = query.trim().toLowerCase()
             if (!keyword) return baseList
-            return baseList.filter(function (note) {
+            // 有搜索词就搜全部（含已归档）：便签最痛的失败是「找不到」，
+            // 「它不在当前视图里」不该成为找不到的理由。点过滤标签会清掉搜索词，语义不打架。
+            return notes.filter(function (note) {
               return note.text.toLowerCase().indexOf(keyword) !== -1
             })
           },
-          [baseList, query],
+          [baseList, query, notes],
         )
         var searchable = notes.length >= SEARCH_THRESHOLD
 
@@ -887,12 +892,21 @@
           [open],
         )
 
-        var close = useCallback(function () {
+        var close = useCallback(function (options) {
+          // 收起后把焦点还给左边缘的「便签」标签：键盘用户不会掉到页面开头。
+          // 点面板外面收起时不还焦点，否则会抢走用户刚点的那一处。
+          var restoreFocus = !options || options.restoreFocus !== false
           setQuery('')
           setView('all')
           setStore(function (prev) {
             return prev.open ? { notes: prev.notes, open: false } : prev
           })
+          if (restoreFocus) {
+            window.setTimeout(function () {
+              var node = tabRef.current
+              if (node && typeof node.focus === 'function') node.focus()
+            }, 0)
+          }
         }, [])
 
         var openPanel = useCallback(function () {
@@ -950,7 +964,7 @@
               if (!panel) return
               var target = event.target
               if (target && typeof panel.contains === 'function' && panel.contains(target)) return
-              close()
+              close({ restoreFocus: false })
             }
             document.addEventListener('pointerdown', onPointerDown, true)
             return function () {
@@ -1227,6 +1241,7 @@
             title: t('tab.title'),
             'aria-label': t('tab.open'),
             'aria-expanded': open ? 'true' : 'false',
+            ref: tabRef,
             onClick: toggle,
           },
           h('span', { className: 'dsn-tab-icon' }, IconNote(15)),
@@ -1305,8 +1320,8 @@
                   {
                     type: 'button',
                     role: 'tab',
-                    className: 'dsn-filter-btn' + (view === 'all' ? ' is-active' : ''),
-                    'aria-selected': view === 'all' ? 'true' : 'false',
+                    className: 'dsn-filter-btn' + (activeTab === 'all' ? ' is-active' : ''),
+                    'aria-selected': activeTab === 'all' ? 'true' : 'false',
                     onClick: function () {
                       setView('all')
                       setQuery('')
@@ -1319,8 +1334,8 @@
                   {
                     type: 'button',
                     role: 'tab',
-                    className: 'dsn-filter-btn' + (view === 'archived' ? ' is-active' : ''),
-                    'aria-selected': view === 'archived' ? 'true' : 'false',
+                    className: 'dsn-filter-btn' + (activeTab === 'archived' ? ' is-active' : ''),
+                    'aria-selected': activeTab === 'archived' ? 'true' : 'false',
                     onClick: function () {
                       setView('archived')
                       setQuery('')
