@@ -100,6 +100,7 @@ dsh-plugins/
   主题 token、左列边界测量等踩坑记录（写新插件前先读）。
 - [docs/publishing.md](docs/publishing.md) —— 版本号、CHANGELOG、打 tag、发 npm、提交插件市场的流程。
 - [docs/research/sticky-notes-landscape.md](docs/research/sticky-notes-landscape.md) —— 市面便签产品调研（13 个产品、7 个可迁移模式），便签类插件的取舍依据。
+- [docs/research/color/README.md](docs/research/color/README.md) —— 颜色的衍生作用：交互 / 工程 / 产品批判三方评估与裁决（含 P0-P2 路线）。
 - [CONTRIBUTING.md](CONTRIBUTING.md) —— 新增一个插件的清单（含模板用法）。
 
 ## 兼容性
