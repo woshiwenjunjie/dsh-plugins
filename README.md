@@ -103,6 +103,8 @@ dsh-plugins/
 - [docs/publishing.md](docs/publishing.md) —— 版本号、CHANGELOG、打 tag、发 npm、提交插件市场的流程。
 - [docs/research/sticky-notes-landscape.md](docs/research/sticky-notes-landscape.md) —— 市面便签产品调研（13 个产品、7 个可迁移模式），便签类插件的取舍依据。
 - [docs/research/color/README.md](docs/research/color/README.md) —— 颜色的衍生作用：交互 / 工程 / 产品批判三方评估与裁决（含 P0-P2 路线）。
+- [docs/research/capture/README.md](docs/research/capture/README.md) —— 语音输入与剪贴板快速记录：捕获通道设想、DSH 语音能力核实、面板成本账与分期。
+- [docs/research/capture/critique.md](docs/research/capture/critique.md) —— 同一功能的独立反方评审（语音建议不做、剪贴板只做「填草稿」，保留分歧）。
 - [CONTRIBUTING.md](CONTRIBUTING.md) —— 新增一个插件的清单（含模板用法）。
 
 ## 兼容性
