@@ -2,7 +2,7 @@
 // 全仓库校验：遍历 plugins/*，对每个插件做
 //   1) package.json 结构检查（bundle patch / client 导出 / 图标 / 版本号）
 //   2) lib/client.js 语法检查（vm 只编译不执行，不会碰 window）
-//   3) 跑 test/smoke.mjs（假 React/window/ctx 的真实加载路径）
+//   3) 跑 test/ 下的测试（smoke 必须有；behavior 等行为测试存在就跑）
 // 零依赖，`node scripts/check.mjs` 即可，CI 与本地同一套。
 import fs from 'node:fs'
 import path from 'node:path'
@@ -74,8 +74,12 @@ function checkPlugin(dirName) {
     fail(dirName, '缺少 test/smoke.mjs（每个插件都要有冒烟测试）')
     return
   }
-  const result = spawnSync(process.execPath, [smoke], { stdio: 'inherit', cwd: pluginDir })
-  if (result.status !== 0) fail(dirName, '冒烟测试失败（exit ' + result.status + '）')
+  for (const testName of ['smoke.mjs', 'behavior.mjs']) {
+    const testFile = path.join(pluginDir, 'test', testName)
+    if (!fs.existsSync(testFile)) continue
+    const result = spawnSync(process.execPath, [testFile], { stdio: 'inherit', cwd: pluginDir })
+    if (result.status !== 0) fail(dirName, `${testName} 失败（exit ${result.status}）`)
+  }
 
   checked += 1
   console.log(`\n✓ ${dirName} — 通过\n`)

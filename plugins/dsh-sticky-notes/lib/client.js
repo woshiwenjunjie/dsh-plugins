@@ -111,11 +111,14 @@
         return { notes: readNotes(), open: readOpen() }
       }
 
+      /** 写成功返回 true：调用方要据此把「已保存」改成「保存失败」，不能骗用户。 */
       function writeNotes(notes) {
         try {
           window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ notes: notes }))
+          return true
         } catch (error) {
           console.warn('[dsh-sticky-notes] 便签保存失败（可能是存储空间已满）：', error)
+          return false
         }
       }
 
@@ -202,6 +205,7 @@
         'composer.aria': '新便签内容',
         saving: '保存中…',
         saved: '已自动保存到本机',
+        'save.failed': '保存失败，请先导出',
         save: '记下',
         'search.placeholder': '搜索便签…（Ctrl+K）',
         'search.aria': '搜索便签',
@@ -253,6 +257,7 @@
         'composer.aria': 'New note',
         saving: 'Saving…',
         saved: 'Saved locally',
+        'save.failed': "Couldn't save — export first",
         save: 'Save',
         'search.placeholder': 'Search notes… (Ctrl+K)',
         'search.aria': 'Search notes',
@@ -569,6 +574,7 @@
         var t = props.t
         var timeLabels = props.timeLabels
         var onChange = props.onChange
+        var onCommit = props.onCommit
         var onRemove = props.onRemove
         var onCycleColor = props.onCycleColor
         var onTogglePin = props.onTogglePin
@@ -593,6 +599,9 @@
             readOnly: archived,
             onChange: function (event) {
               onChange(note.id, event.target.value)
+            },
+            onBlur: function () {
+              if (typeof onCommit === 'function') onCommit(note.id)
             },
           }),
           h(
@@ -668,6 +677,8 @@
         var [draft, setDraft] = useState('')
         var [tick, setTick] = useState(Date.now())
         var [dirty, setDirty] = useState(false)
+        // 上一次落盘是否失败（存储满、被禁用）：失败时不能继续显示「已保存」。
+        var [saveFailed, setSaveFailed] = useState(false)
         var [query, setQuery] = useState('')
         // 'all' 或 'archived'：归档视图切换。
         var [view, setView] = useState('all')
@@ -681,6 +692,8 @@
         var searchRef = useRef(null)
         // 埋点去抖：同一条便签一次会话里只记一次「编辑」，搜索一次会话只记一次。
         var editedInSession = useRef({})
+        // 这条便签自上次失焦后有没有被真的改过：只有改过才更新排序时间。
+        var touchedSinceFocus = useRef({})
         var searchRecorded = useRef(false)
         // 最新一份状态，供「刷新/卸载前补写」这类拿不到闭包的路径读取。
         var latestStore = useRef(store)
@@ -805,8 +818,9 @@
             setDirty(true)
             if (saveTimer.current) window.clearTimeout(saveTimer.current)
             saveTimer.current = window.setTimeout(function () {
-              writeNotes(latestStore.current.notes)
+              var ok = writeNotes(latestStore.current.notes)
               setDirty(false)
+              setSaveFailed(!ok)
             }, SAVE_DEBOUNCE_MS)
             return function () {
               if (saveTimer.current) window.clearTimeout(saveTimer.current)
@@ -830,7 +844,7 @@
               window.clearTimeout(saveTimer.current)
               saveTimer.current = 0
             }
-            writeNotes(latestStore.current.notes)
+            if (!writeNotes(latestStore.current.notes)) setSaveFailed(true)
           }
           window.addEventListener('pagehide', flushNow)
           window.addEventListener('beforeunload', flushNow)
@@ -1031,14 +1045,34 @@
               if (note.id !== id) return note
               if (note.text === text) return note
               changed = true
-              return { id: note.id, text: text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: Date.now() }
+              // 注意：这里不刷 updatedAt。列表按 updatedAt 排序，如果每敲一个字就刷，
+              // 正在编辑的卡片会立刻跳到列表最顶部，滚动位置跟着跳——打字体验直接崩。
+              // 「最近改动」留到失焦时由 commitNote 更新。
+              return { id: note.id, text: text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return changed ? { notes: next, open: prev.open } : prev
           })
+          touchedSinceFocus.current[id] = true
           if (editedInSession.current[id] !== true) {
             editedInSession.current[id] = true
             recordMetric('edit')
           }
+        }
+
+        // 编辑结束（失焦）才把这条便签标记成「刚改过」。没真改动过的点击不算。
+        function commitNote(id) {
+          if (touchedSinceFocus.current[id] !== true) return
+          delete touchedSinceFocus.current[id]
+          var target = findNote(id)
+          if (!target || target.archived === true) return
+          var now = Date.now()
+          setStore(function (prev) {
+            var next = prev.notes.map(function (note) {
+              if (note.id !== id) return note
+              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: now }
+            })
+            return { notes: next, open: prev.open }
+          })
         }
 
         function cycleColor(id) {
@@ -1235,6 +1269,8 @@
                 setDraft(event.target.value)
               },
               onKeyDown: function (event) {
+                // 中文/日文输入法正在组词时按 Enter 是「选词」，不能当成「记下」。
+                if (event.nativeEvent && event.nativeEvent.isComposing) return
                 if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                   event.preventDefault()
                   addNote(draft)
@@ -1244,7 +1280,14 @@
             h(
               'div',
               { className: 'dsn-composer-foot' },
-              h('span', { className: 'dsn-hint' }, dirty ? t('saving') : t('saved')),
+              h(
+                'span',
+                {
+                  className: 'dsn-hint' + (saveFailed ? ' is-error' : ''),
+                  role: saveFailed ? 'alert' : undefined,
+                },
+                saveFailed ? t('save.failed') : dirty ? t('saving') : t('saved'),
+              ),
               h(
                 'button',
                 { type: 'button', className: 'dsn-save', disabled: draft.trim().length === 0, onClick: function () { addNote(draft) } },
@@ -1344,6 +1387,7 @@
                     t: t,
                     timeLabels: timeLabels,
                     onChange: updateNote,
+                    onCommit: commitNote,
                     onRemove: removeNote,
                     onCycleColor: cycleColor,
                     onTogglePin: togglePin,
@@ -1448,6 +1492,7 @@
         '.dsn-filter-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
         '.dsn-composer-foot{display:flex;align-items:center;gap:8px}',
         '.dsn-hint{font-size:11px;color:var(--dsn-fg-2);margin-right:auto}',
+        '.dsn-hint.is-error{color:var(--dsw-alias-state-error-primary,#d84315);font-weight:600}',
         '.dsn-save{display:inline-flex;align-items:center;gap:5px;min-height:32px;padding:6px 14px;border:0;border-radius:9px;background:var(--dsn-accent);color:var(--dsn-on-accent);font:inherit;font-size:12px;font-weight:650;cursor:pointer;transition:filter .12s ease,transform .12s ease}',
         '.dsn-save:hover:not(:disabled){filter:brightness(.94);transform:translateY(-1px)}',
         '.dsn-save:disabled{opacity:.42;cursor:default;transform:none;filter:none}',
