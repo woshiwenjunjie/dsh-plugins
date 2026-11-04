@@ -257,7 +257,12 @@ vm.runInContext(source, sandbox, { filename: 'client.js' })
 // ---------------------------------------------------------------- 挂载组件
 
 let registered = null
+// 宿主服务：插件会用 ctx.get('uiWorkspace') 探测「跳回原会话」的能力，测试里由它决定给不给。
+let fakeUiWorkspace = null
 const ctx = {
+  get(key) {
+    return key === 'uiWorkspace' ? fakeUiWorkspace : null
+  },
   effect(callback) {
     const dispose = callback()
     return typeof dispose === 'function' ? dispose : () => {}
@@ -641,8 +646,8 @@ let fakeActiveSession = 'ses-A'
 function sessionState() {
   return {
     byId: {
-      'ses-A': { id: 'ses-A', retainedBy: { mainView: fakeActiveSession === 'ses-A' ? 1 : 0 } },
-      'ses-B': { id: 'ses-B', retainedBy: { mainView: fakeActiveSession === 'ses-B' ? 1 : 0 } },
+      'ses-A': { id: 'ses-A', title: '会话 A 的标题', retainedBy: { mainView: fakeActiveSession === 'ses-A' ? 1 : 0 } },
+      'ses-B': { id: 'ses-B', title: '会话 B 的标题', retainedBy: { mainView: fakeActiveSession === 'ses-B' ? 1 : 0 } },
     },
   }
 }
@@ -692,6 +697,51 @@ check('全部视图包含老便签与两个会话的便签', cardTexts().slice()
 // 没拿到 kit 时不该出现「本会话」标签（降级成一个纯本地便签栏）
 remount([legacyNote])
 check('没有 kit 时只有 2 个标签', filterChips().length, 2)
+
+// ---------------------------------------------------------------- 来源会话
+//
+// 便签里存着「写在哪个会话里」：「全部」视图要能看出来自别的会话，点一下跳回那个会话
+// （走宿主 uiWorkspace.openSession）。宿主服务缺失时如实提示，不静默失败。
+
+function sourceChips() {
+  return elements.filter((el) => String(el.props.className || '') === 'dsn-source')
+}
+
+const sourceSeed = [
+  { id: 'src-a', text: '写在会话 A 的想法', color: 'amber', pinned: false, sessionId: 'ses-A', createdAt: now - 3000, updatedAt: now - 3000 },
+  { id: 'src-b', text: '写在会话 B 的想法', color: 'sky', pinned: false, sessionId: 'ses-B', createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'src-none', text: '没有会话信息的老便签', color: 'mint', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+]
+
+fakeActiveSession = 'ses-B'
+fakeUiWorkspace = null
+remount(sourceSeed, kit)
+check('只给「别的会话里写的」便签标来源', sourceChips().length, 1)
+check('来源标签显示那个会话的标题', flattenText(sourceChips()[0].props.children), '会话 A 的标题')
+
+remount(sourceSeed)
+check('没有 kit 时不标来源（无从判断哪个是当前会话）', sourceChips().length, 0)
+
+// 宿主有 uiWorkspace：点来源直接跳回去
+const jumped = []
+fakeUiWorkspace = { openSession: (id) => jumped.push(id) }
+remount(sourceSeed, kit)
+act(() => sourceChips()[0].props.onClick({ stopPropagation() {} }))
+check('点来源跳到写这条便签的会话', jumped, ['ses-A'])
+check('跳转成功不弹失败提示', toastEl(), undefined)
+
+// 会话已不在列表里（被删 / 换了工作区）：标题退回「其他会话」，但照样能试着跳
+const orphanSeed = [
+  { id: 'orphan', text: '来自已删除会话', color: 'amber', pinned: false, sessionId: 'ses-gone', createdAt: now, updatedAt: now },
+]
+remount(orphanSeed, kit)
+check('会话查不到时标题退回「其他会话」', flattenText(sourceChips()[0].props.children), '其他会话')
+
+// 宿主没这个服务（老版本）：点下去要如实说一句，而不是毫无反应
+fakeUiWorkspace = null
+remount(sourceSeed, kit)
+act(() => sourceChips()[0].props.onClick({ stopPropagation() {} }))
+check('没有 uiWorkspace 时如实提示', toastEl() && toastEl().props.children[0].props.children, '打不开那个会话')
 
 // ---------------------------------------------------------------- 草稿与复制
 
@@ -801,5 +851,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
 )
