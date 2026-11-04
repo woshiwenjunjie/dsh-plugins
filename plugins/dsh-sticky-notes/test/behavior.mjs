@@ -46,6 +46,8 @@ let timers = new Map()
 let timerSeq = 0
 let focusedElement = null
 let lastBlob = null
+// 组件收到的 props：真环境里是 slot 的标准 kit（含 useSessions），测试里可以模拟。
+let runtimeProps = {}
 // 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
 let passCardRenders = 0
 let maxPassCardRenders = 0
@@ -257,7 +259,7 @@ function renderPass() {
   passCardRenders = 0
   elements = []
   pendingEffects = []
-  registered.component()
+  registered.component(runtimeProps)
   if (passCardRenders > maxPassCardRenders) maxPassCardRenders = passCardRenders
   const effects = pendingEffects
   for (const effect of effects) {
@@ -410,7 +412,8 @@ function closeButton() {
 }
 
 // 换一套数据重新挂载：搜索框要便签 ≥ 6 条才出现，另外放一条已归档的。
-function remount(nextNotes) {
+function remount(nextNotes, props) {
+  runtimeProps = props || {}
   storage.set('dsh-sticky-notes:v1', JSON.stringify({ notes: nextNotes }))
   storage.set('dsh-sticky-notes:open', '1')
   hookSlots = []
@@ -565,6 +568,65 @@ await actAsync(() => fileInput().props.onChange({ target: { files: [fakeFile(JSO
 check('空备份给错误提示', toastEl() && toastEl().props.children[0].props.children, '备份文件里没有便签')
 check('空备份不动现有数据', cardTexts().length, 2)
 
+// ---------------------------------------------------------------- 会话绑定
+
+// 模拟 slot 的标准 kit：useSessions 是 selector hook，返回「主视图当前会话」。
+let fakeActiveSession = 'ses-A'
+function sessionState() {
+  return {
+    byId: {
+      'ses-A': { id: 'ses-A', retainedBy: { mainView: fakeActiveSession === 'ses-A' ? 1 : 0 } },
+      'ses-B': { id: 'ses-B', retainedBy: { mainView: fakeActiveSession === 'ses-B' ? 1 : 0 } },
+    },
+  }
+}
+const kit = { useSessions: (selector) => selector(sessionState()) }
+
+function filterChips() {
+  return elements.filter((el) => el.type === 'button' && String(el.props.className || '').indexOf('dsn-filter-btn') !== -1)
+}
+function noteTextsInStorage() {
+  return JSON.parse(storage.get('dsh-sticky-notes:v1')).notes
+}
+
+const legacyNote = { id: 'legacy', text: '老便签（没有会话信息）', color: 'amber', pinned: false, createdAt: now - 9000, updatedAt: now - 9000 }
+fakeActiveSession = 'ses-A'
+remount([legacyNote], kit)
+check('拿到会话 id 时出现「本会话」标签', filterChips().length, 3)
+check('本会话标签文案带条数', String(filterChips()[1].props.children), '本会话 0')
+
+// 在会话 A 里记一条
+act(() => draftArea().props.onChange({ target: { value: '记在会话 A' } }))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+advance(300)
+check('新便签带上当前会话 id', noteTextsInStorage().find((note) => note.text === '记在会话 A').sessionId, 'ses-A')
+
+// 切到会话 B，再记一条
+fakeActiveSession = 'ses-B'
+flush()
+act(() => draftArea().props.onChange({ target: { value: '记在会话 B' } }))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+advance(300)
+check('切会话后新便签跟着换 id', noteTextsInStorage().find((note) => note.text === '记在会话 B').sessionId, 'ses-B')
+
+// 「本会话」视图只显示当前会话的便签
+check('本会话标签计数跟着走', String(filterChips()[1].props.children), '本会话 1')
+act(() => filterChips()[1].props.onClick({}))
+check('本会话视图只显示会话 B 的便签', cardTexts(), ['记在会话 B'])
+
+// 切回会话 A，同一视图自动切换
+fakeActiveSession = 'ses-A'
+flush()
+check('切回会话 A 后本会话视图自动更新', cardTexts(), ['记在会话 A'])
+
+// 全部视图仍然能看到所有便签（含没有会话信息的老便签）
+act(() => filterChips()[0].props.onClick({}))
+check('全部视图包含老便签与两个会话的便签', cardTexts().slice().sort(), ['记在会话 A', '记在会话 B', '老便签（没有会话信息）'].sort())
+
+// 没拿到 kit 时不该出现「本会话」标签（降级成一个纯本地便签栏）
+remount([legacyNote])
+check('没有 kit 时只有 2 个标签', filterChips().length, 2)
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -573,5 +635,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 / 收起还焦点 / 备份导出导入 round-trip / 合并与撤销',
+  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定',
 )

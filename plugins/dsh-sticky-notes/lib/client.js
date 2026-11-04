@@ -82,6 +82,8 @@
           pinned: raw.pinned === true,
           archived: raw.archived === true,
           archivedAt: typeof raw.archivedAt === 'number' ? raw.archivedAt : 0,
+          // 写下这条便签时所处的会话：老数据没有这个字段，归到「全部」里，不强制迁移。
+          sessionId: typeof raw.sessionId === 'string' && raw.sessionId ? raw.sessionId : null,
           createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
           updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : now,
         }
@@ -337,7 +339,10 @@
         'toast.deleted': '已删除 1 条便签',
         'toast.undo': '撤销',
         'filter.all': '全部',
+        'filter.session': '本会话',
         'filter.archived': '已归档',
+        'empty.session': '这个会话还没有便签',
+        'empty.session.sub': '在这里记下的便签会自动归到本会话。',
         'metric.open': '打开面板',
         'metric.create': '新建便签',
         'metric.edit': '编辑便签',
@@ -398,7 +403,10 @@
         'toast.deleted': '1 note deleted',
         'toast.undo': 'Undo',
         'filter.all': 'All',
+        'filter.session': 'This session',
         'filter.archived': 'Archived',
+        'empty.session': 'No notes in this session yet',
+        'empty.session.sub': 'Notes you write here are tagged with this session.',
         'metric.open': 'Opened panel',
         'metric.create': 'Notes created',
         'metric.edit': 'Notes edited',
@@ -702,6 +710,42 @@
         return h('textarea', Object.assign({}, props, { ref: ref }))
       }
 
+      // ------------------------------------------------------------ 当前会话
+      //
+      // 「当前会话」只能从 slot 的标准 kit 里读：ui-layout 自己的 DocumentTitle 也是这么拿的
+      // （state.byId 里 retainedBy.mainView > 0 的那条就是主视图当前选中的会话）。
+      // 拿不到 kit 就返回 null —— 便签栏照常工作，只是不出现「本会话」这个视图。
+      function selectActiveSessionId(state) {
+        if (!state || !state.byId) return null
+        var rows = state.byId
+        for (var id in rows) {
+          if (!Object.prototype.hasOwnProperty.call(rows, id)) continue
+          var row = rows[id]
+          if (!row) continue
+          var retained = row.retainedBy
+          if (retained && retained.mainView > 0) return row.id || id
+        }
+        return null
+      }
+
+      /**
+       * 两个分支都只占一个 hook 槽位，保证 hook 顺序稳定：
+       * 有 kit 时用它的 selector hook（会订阅、切会话会重渲染），没有时退回一个常量 state。
+       */
+      function useActiveSessionId(props) {
+        var source = props && typeof props.useSessions === 'function' ? props.useSessions : null
+        if (source) {
+          try {
+            var id = source(selectActiveSessionId)
+            return typeof id === 'string' && id ? id : null
+          } catch (error) {
+            return null
+          }
+        }
+        var fallback = useState(null)
+        return fallback[0]
+      }
+
       // ---------------------------------------------------------------- 卡片
 
       function NoteCard(props) {
@@ -814,6 +858,8 @@
 
       function StickyNotesOverlay(props) {
         var locale = props && props.locale ? props.locale : null
+        // 当前会话：来自 slot 的标准 kit；拿不到就是 null（不出现「本会话」视图）。
+        var activeSessionId = useActiveSessionId(props)
         var [store, setStore] = useState(readStore)
         var [draft, setDraft] = useState('')
         var [tick, setTick] = useState(Date.now())
@@ -924,7 +970,18 @@
           [notes],
         )
 
-        var baseList = view === 'archived' ? archivedNotes : activeNotes
+        // 会话视图：只看「在当前会话里写下的便签」。老便签没有 sessionId，不会出现在这里。
+        var sessionNotes = useMemo(
+          function () {
+            if (!activeSessionId) return []
+            return activeNotes.filter(function (note) {
+              return note.sessionId === activeSessionId
+            })
+          },
+          [activeNotes, activeSessionId],
+        )
+
+        var baseList = view === 'archived' ? archivedNotes : view === 'session' ? sessionNotes : activeNotes
         // 搜索时列表覆盖全部（含归档），标签同步高亮「全部」，否则标签和结果对不上。
         var activeTab = query.trim() ? 'all' : view
         var filteredNotes = useMemo(
@@ -1208,6 +1265,8 @@
               pinned: false,
               archived: false,
               archivedAt: 0,
+              // 记下这条便签时所在的会话：之后可以只看「本会话」。
+              sessionId: activeSessionId,
               createdAt: now,
               updatedAt: now,
             }
@@ -1216,7 +1275,7 @@
           setDraft('')
           setTick(now)
           recordMetric('create')
-        }, [])
+        }, [activeSessionId])
 
         // 下面这些回调都会作为 memo(NoteCard) 的 props：引用必须稳定，否则 memo 全部失效。
         // 所以统一 useCallback([])，并且**不闭包 store** —— 需要「当前列表」时读 latestStore。
@@ -1601,7 +1660,7 @@
           notes.length > 0
             ? h(
                 'div',
-                { className: 'dsn-filter', role: 'tablist', 'aria-label': t('filter.all') + ' / ' + t('filter.archived') },
+                { className: 'dsn-filter', role: 'tablist', 'aria-label': t('name') },
                 h(
                   'button',
                   {
@@ -1616,6 +1675,23 @@
                   },
                   t('filter.all') + ' ' + activeNotes.length,
                 ),
+                // 「本会话」只在真拿到会话 id 时才出现：拿不到就当一个纯本地便签栏用。
+                activeSessionId
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        role: 'tab',
+                        className: 'dsn-filter-btn' + (activeTab === 'session' ? ' is-active' : ''),
+                        'aria-selected': activeTab === 'session' ? 'true' : 'false',
+                        onClick: function () {
+                          setView('session')
+                          setQuery('')
+                        },
+                      },
+                      t('filter.session') + ' ' + sessionNotes.length,
+                    )
+                  : null,
                 h(
                   'button',
                   {
@@ -1678,8 +1754,8 @@
               ? h(
                   'div',
                   { className: 'dsn-empty' },
-                  h('div', { className: 'dsn-empty-title' }, query ? t('empty.search') : view === 'archived' ? t('empty.archived') : t('empty.none')),
-                  h('div', { className: 'dsn-empty-sub' }, query ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : t('empty.none.sub')),
+                  h('div', { className: 'dsn-empty-title' }, query ? t('empty.search') : view === 'archived' ? t('empty.archived') : view === 'session' ? t('empty.session') : t('empty.none')),
+                  h('div', { className: 'dsn-empty-sub' }, query ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : view === 'session' ? t('empty.session.sub') : t('empty.none.sub')),
                 )
               : filteredNotes.map(function (note) {
                   return h(NoteCardMemo, {
@@ -1750,7 +1826,8 @@
       }
 
       function StickyNotesRoot(props) {
-        return h(StickyNotesBoundary, null, h(StickyNotesOverlay, { locale: props && props.locale }))
+        // 原样把 slot 送来的一整套 props（含 useSessions 这类标准 selector hook）转给主组件。
+        return h(StickyNotesBoundary, null, h(StickyNotesOverlay, props || {}))
       }
 
       // ---------------------------------------------------------------- 样式
@@ -1879,8 +1956,10 @@
         }, 'dsh-sticky-notes: styles')
 
         ctx.slots.inject('shell.overlay', function* () {
-          yield ctx.slots.register({ name: 'shell.overlay', id: 'sticky-notes', order: 860 }, function () {
-            return h(StickyNotesRoot, { locale: locale })
+          yield ctx.slots.register({ name: 'shell.overlay', id: 'sticky-notes', order: 860 }, function (slotProps) {
+            // slot 会送来一整套标准 kit（useSessions / usePanelInfo / …）：
+            // 必须原样转发下去，否则便签栏读不到「当前会话」。
+            return h(StickyNotesRoot, Object.assign({}, slotProps || {}, { locale: locale }))
           })
         })
       }
