@@ -2049,7 +2049,10 @@
         '.dsn-filter-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
         '.dsn-composer-foot{display:flex;align-items:center;gap:8px}',
         '.dsn-hint{font-size:11px;color:var(--dsn-fg-2);margin-right:auto}',
-        '.dsn-hint.is-error{color:var(--dsw-alias-state-error-primary,#d84315);font-weight:600}',
+        // 小字不用错误色当文字色：实测浅色主题下 error 色压白底只有 4.50:1，
+        // 贴着 AA 线。改成正文色 + 一个错误色圆点（图形元素只需 3:1 语义）。
+        '.dsn-hint.is-error{color:var(--dsn-fg);font-weight:600}',
+        '.dsn-hint.is-error::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-error-primary,#d84315);margin-right:4px;vertical-align:1px}',
         '.dsn-save{display:inline-flex;align-items:center;gap:5px;min-height:32px;padding:6px 14px;border:0;border-radius:9px;background:var(--dsn-accent);color:var(--dsn-on-accent);font:inherit;font-size:12px;font-weight:650;cursor:pointer;transition:filter .12s ease,transform .12s ease}',
         '.dsn-save:hover:not(:disabled){filter:brightness(.94);transform:translateY(-1px)}',
         '.dsn-save:disabled{opacity:.42;cursor:default;transform:none;filter:none}',
@@ -2089,7 +2092,9 @@
         '.dsn-empty-title{font-size:13px;font-weight:650;color:var(--dsn-fg)}',
         '.dsn-empty-sub{font-size:11.5px;color:var(--dsn-fg-2)}',
         '.dsn-toast{position:absolute;left:12px;right:12px;bottom:12px;display:flex;align-items:center;gap:8px;padding:8px 8px 8px 12px;border-radius:10px;background:var(--dsn-accent);color:var(--dsn-on-accent);box-shadow:0 8px 24px rgba(0,0,0,.24);animation:dsn-toast-in .12s ease-out}',
-        '.dsn-toast.is-error{background:var(--dsw-alias-state-error-primary,#d84315)}',
+        // 错误提示条：改成「面板底 + 错误色边框」，文字用正文色 18.90:1；
+        // 之前是错误色实底 + 反色文字，浅色主题实测只有 4.50:1（贴线不合格）。
+        '.dsn-toast.is-error{background:var(--dsn-surface);color:var(--dsn-fg);border:1px solid var(--dsw-alias-state-error-primary,#d84315);border-left-width:3px}',
         '.dsn-toast-text{font-size:12px;margin-right:auto}',
         '.dsn-toast-undo{display:inline-flex;align-items:center;gap:4px;min-height:24px;border:0;border-radius:7px;padding:3px 9px;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:650;cursor:pointer}',
         '.dsn-toast-undo:hover{background:rgba(127,127,127,.24)}',

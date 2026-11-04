@@ -74,7 +74,7 @@ function checkPlugin(dirName) {
     fail(dirName, '缺少 test/smoke.mjs（每个插件都要有冒烟测试）')
     return
   }
-  for (const testName of ['smoke.mjs', 'behavior.mjs']) {
+  for (const testName of ['smoke.mjs', 'behavior.mjs', 'contrast.mjs']) {
     const testFile = path.join(pluginDir, 'test', testName)
     if (!fs.existsSync(testFile)) continue
     const result = spawnSync(process.execPath, [testFile], { stdio: 'inherit', cwd: pluginDir })
