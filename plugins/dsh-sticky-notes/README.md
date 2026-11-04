@@ -77,6 +77,18 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | 动效 | 面板与撤销条 120ms，`prefers-reduced-motion` 下关闭 |
 | 控件取舍 | 保存按钮 / 输入框 / 撤销条保留自研紧凑控件（300px 抽屉的密度不适合设置页尺度的 primitives Button/Input） |
 
+## 落地手感（0.1.2）
+
+用起来才发现的三个问题，都改在最痛的地方：
+
+| 问题 | 之前 | 现在 |
+|---|---|---|
+| 编辑时卡片跳位 | 每敲一个字就把这张便签顶到列表最前，滚动位置跟着跳 | 打字过程中不动排序，失焦后才更新「最近改动」；没真改过的点击不算 |
+| 存储写失败 | localStorage 满了仍然显示「已自动保存」，刷新后内容没了 | 显示红色「保存失败，请先导出」（`role="alert"`），恢复可写后自动回到「已保存」 |
+| 中文输入法 | 组词选字时按回车，半句话被当成一条便签存下、草稿被清空 | 判断 `isComposing`，组词期间回车只选词 |
+
+这三条由 `test/behavior.mjs` 守着：用迷你 React 真跑组件状态与依赖，修复前跑会失败。
+
 ## 数据存在哪
 
 全部存在**本机浏览器 localStorage**，不经 Host、不上传、不发网络请求：
@@ -111,7 +123,7 @@ dsh plugin --profile web add link:<本目录绝对路径>
 ## 开发
 
 ```bash
-npm test        # 冒烟测试：假 React/window/ctx 跑一遍 client.js 的加载与注册
+npm test        # smoke（加载与注册）+ behavior（迷你 React 驱动真实交互）
 npm run preview # 用真实组件输出生成静态预览页到 test/out/
 ```
 
