@@ -1,6 +1,6 @@
 {
   "name": "@woshiwenjunjie/dsh-sticky-notes",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "DSH Web 左侧便签栏：随手记录、置顶、搜索、归档，数据只存在本机浏览器。",
   "type": "module",
   "main": "lib/index.js",

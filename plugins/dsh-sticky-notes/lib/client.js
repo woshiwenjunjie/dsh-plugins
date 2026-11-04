@@ -78,6 +78,17 @@
       /** 便签配色：卡片左侧的窄色条，配色名只存在数据里，样式由 class 决定。 */
       var COLOR_IDS = ['amber', 'sky', 'mint', 'rose', 'violet']
 
+      /**
+       * 色名。颜色本身是唯一的分类通道，所以每个色块都必须有文字名——
+       * 色弱、色盲和读屏用户只能靠这个名字知道「刚才选的是哪一色」。
+       * 名字用颜色名（琥珀/天蓝…），不用语义名（待办/工作…）：语义归用户，产品不写死。
+       */
+      function colorName(t, id) {
+        var key = 'color.name.' + id
+        var label = t(key)
+        return !label || label === key ? id : label
+      }
+
       function newId() {
         return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
       }
@@ -438,7 +449,16 @@
         'note.pinned': '置顶',
         'note.pin': '置顶这条便签',
         'note.unpin': '取消置顶',
-        'note.color': '换个颜色',
+        'note.color': '选择颜色',
+        'color.pick': '选择颜色',
+        'color.current': '颜色：',
+        'color.filter': '按颜色筛选',
+        'color.any': '全部颜色',
+        'color.name.amber': '琥珀',
+        'color.name.sky': '天蓝',
+        'color.name.mint': '薄荷',
+        'color.name.rose': '玫瑰',
+        'color.name.violet': '紫罗兰',
         'note.delete': '删除这条便签（可撤销）',
         'note.archive': '归档这条便签',
         'note.restore': '恢复这条便签',
@@ -516,7 +536,16 @@
         'note.pinned': 'Pinned',
         'note.pin': 'Pin this note',
         'note.unpin': 'Unpin this note',
-        'note.color': 'Change color',
+        'note.color': 'Choose color',
+        'color.pick': 'Choose a color',
+        'color.current': 'Color: ',
+        'color.filter': 'Filter by color',
+        'color.any': 'All colors',
+        'color.name.amber': 'Amber',
+        'color.name.sky': 'Sky',
+        'color.name.mint': 'Mint',
+        'color.name.rose': 'Rose',
+        'color.name.violet': 'Violet',
         'note.delete': 'Delete this note (undoable)',
         'note.archive': 'Archive this note',
         'note.restore': 'Restore this note',
@@ -1145,7 +1174,11 @@
         var onCommit = props.onCommit
         var onRemove = props.onRemove
         var onCopy = props.onCopy
-        var onCycleColor = props.onCycleColor
+        // 色点现在是「打开调色板」，不再是循环换色：语义选择必须能一眼看到全部选项。
+        var onColor = props.onColor
+        // 只有「正在选色的那张卡片」才会收到这两个 prop（见父组件的按需加 prop 说明）。
+        var paletteOpen = props.paletteOpen === true
+        var onPickColor = props.onPickColor
         var onTogglePin = props.onTogglePin
         var onArchive = props.onArchive
         var onUnarchive = props.onUnarchive
@@ -1320,11 +1353,14 @@
               ? null
               : h('button', {
                   type: 'button',
-                  className: 'dsn-dot-btn',
-                  title: t('note.color'),
-                  'aria-label': t('note.color'),
+                  className: 'dsn-dot-btn' + (paletteOpen ? ' is-open' : ''),
+                  // 色名写进 aria-label / title：颜色不能是唯一信息通道。
+                  title: t('color.current') + colorName(t, note.color),
+                  'aria-label': t('color.current') + colorName(t, note.color) + '（' + t('note.color') + '）',
+                  'aria-expanded': paletteOpen ? 'true' : 'false',
+                  'aria-haspopup': 'true',
                   onClick: function () {
-                    onCycleColor(note.id)
+                    onColor(note.id)
                   },
                 }),
             h(
@@ -1369,6 +1405,33 @@
               IconTrash(15),
             ),
           ),
+          // 调色板：内联展开（不做浮层），所以不会被列滚动裁掉、也不用处理定位。
+          // 每个选项都是「色块 + 色名」，选色不用试、读屏也念得出。
+          paletteOpen
+            ? h(
+                'div',
+                { className: 'dsn-palette', role: 'group', 'aria-label': t('color.pick') },
+                COLOR_IDS.map(function (colorId) {
+                  var current = colorId === note.color
+                  return h(
+                    'button',
+                    {
+                      key: colorId,
+                      type: 'button',
+                      className: 'dsn-palette-option dsn-c-' + colorId + (current ? ' is-current' : ''),
+                      title: colorName(t, colorId),
+                      'aria-label': colorName(t, colorId),
+                      'aria-pressed': current ? 'true' : 'false',
+                      onClick: function () {
+                        if (typeof onPickColor === 'function') onPickColor(note.id, colorId)
+                      },
+                    },
+                    h('span', { className: 'dsn-palette-swatch' }),
+                    h('span', { className: 'dsn-palette-name' }, colorName(t, colorId)),
+                  )
+                }),
+              )
+            : null,
         )
       }
 
@@ -1394,6 +1457,10 @@
         var [query, setQuery] = useState('')
         // 搜索态下点中某一条：只把这一条切回可编辑，其余仍是只读高亮。
         var [editingId, setEditingId] = useState(null)
+        // 颜色：哪张卡片打开了调色板（一次只开一个）、搜索区选中的颜色、颜色菜单是否展开。
+        var [paletteId, setPaletteId] = useState(null)
+        var [colorFilter, setColorFilter] = useState(null)
+        var [colorMenuOpen, setColorMenuOpen] = useState(false)
         // 'all' 或 'archived'：归档视图切换。
         var [view, setView] = useState('all')
         // 删除后 5 秒内可撤销：{ note } 或 null。
@@ -1516,20 +1583,38 @@
         )
 
         var baseList = view === 'archived' ? archivedNotes : view === 'session' ? sessionNotes : activeNotes
-        // 搜索时列表覆盖全部（含归档），标签同步高亮「全部」，否则标签和结果对不上。
         var search = searchOf(query)
-        var activeTab = search.active ? 'all' : view
+        // 颜色筛选和搜索词一样属于「找东西」：有任何一个，列表就看全部（含归档），
+        // 过滤标签同步高亮「全部」，否则标签和结果对不上。
+        var filterActive = search.active || Boolean(colorFilter)
+        var activeTab = filterActive ? 'all' : view
         var filteredNotes = useMemo(
           function () {
-            if (!search.active) return baseList
-            // 有搜索条件就搜全部（含已归档）：便签最痛的失败是「找不到」，
-            // 「它不在当前视图里」不该成为找不到的理由。点过滤标签会清掉搜索词，语义不打架。
-            // `#标签` 是标签条件（前缀匹配），其余词是正文关键词，多个条件 AND。
+            if (!filterActive) return baseList
             return notes.filter(function (note) {
-              return matchesSearch(note, search)
+              if (!matchesSearch(note, search)) return false
+              // 颜色与 `#标签` / 关键词是「且」：先按文字条件筛，再按颜色收窄。
+              return !colorFilter || note.color === colorFilter
             })
           },
-          [baseList, search, notes],
+          [baseList, filterActive, search, colorFilter, notes],
+        )
+        // 各色条数：按当前搜索词算、但不叠加颜色条件——菜单里直接告诉你「选了会剩几条」。
+        var colorCounts = useMemo(
+          function () {
+            var counts = {}
+            for (var i = 0; i < COLOR_IDS.length; i += 1) counts[COLOR_IDS[i]] = 0
+            var total = 0
+            for (var j = 0; j < notes.length; j += 1) {
+              var note = notes[j]
+              if (!matchesSearch(note, search)) continue
+              total += 1
+              if (counts[note.color] !== undefined) counts[note.color] += 1
+            }
+            counts.all = total
+            return counts
+          },
+          [notes, search],
         )
         var searchable = notes.length >= SEARCH_THRESHOLD
 
@@ -1545,7 +1630,7 @@
           },
           [review, notes],
         )
-        var showReview = Boolean(reviewNote) && !search.active && view === 'all'
+        var showReview = Boolean(reviewNote) && !filterActive && view === 'all'
 
         var dismissReview = useCallback(function () {
           setReview(function (prev) {
@@ -1682,6 +1767,10 @@
           setQuery('')
           setView('all')
           setMenuOpen(false)
+          // 收起面板时把「找东西」的临时状态一并复位，下次打开是干净的一张列表。
+          setColorFilter(null)
+          setColorMenuOpen(false)
+          setPaletteId(null)
           setStore(function (prev) {
             return prev.open ? { notes: prev.notes, open: false } : prev
           })
@@ -1708,20 +1797,31 @@
           [open, close, openPanel],
         )
 
-        // Esc：有搜索词先清搜索，再按一次才收起；Ctrl/Cmd+K 聚焦搜索。
+        // Esc 从内到外逐层退出：菜单 → 卡片调色板 → 颜色菜单 → 搜索词 → 颜色筛选 → 收起面板。
         useEffect(
           function () {
             if (!open) return undefined
             function onKeyDown(event) {
               if (event.key === 'Escape') {
                 event.stopPropagation()
-                // 菜单开着时，Esc 先关菜单；再按一次才清搜索 / 收面板。
                 if (menuOpen) {
                   setMenuOpen(false)
                   return
                 }
+                if (paletteId) {
+                  setPaletteId(null)
+                  return
+                }
+                if (colorMenuOpen) {
+                  setColorMenuOpen(false)
+                  return
+                }
                 if (query) {
                   setQuery('')
+                  return
+                }
+                if (colorFilter) {
+                  setColorFilter(null)
                   return
                 }
                 close()
@@ -1741,7 +1841,7 @@
               window.removeEventListener('keydown', onKeyDown, true)
             }
           },
-          [open, close, query, menuOpen],
+          [open, close, query, menuOpen, paletteId, colorMenuOpen, colorFilter],
         )
 
         // 点面板外面收起。没有全屏遮罩，所以点一下别处既能让面板消失、又不会拦掉那次点击。
@@ -1921,17 +2021,32 @@
           })
         }, [])
 
-        var cycleColor = useCallback(function (id) {
+        // 换色：只换 color，**不动 updatedAt**——换色不是「改了内容」，不该把便签顶到最上面。
+        var setNoteColor = useCallback(function (id, color) {
+          if (COLOR_IDS.indexOf(color) === -1) return
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
-              if (note.id !== id) return note
-              var index = COLOR_IDS.indexOf(note.color)
-              var color = COLOR_IDS[(index + 1) % COLOR_IDS.length]
+              if (note.id !== id || note.color === color) return note
               return { id: note.id, text: note.text, color: color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return { notes: next, open: prev.open }
           })
         }, [])
+
+        // 点击色点开/关调色板：一次只开一个，再点同一个就收起。
+        var togglePalette = useCallback(function (id) {
+          setPaletteId(function (prev) {
+            return prev === id ? null : id
+          })
+        }, [])
+
+        var chooseColor = useCallback(
+          function (id, color) {
+            setNoteColor(id, color)
+            setPaletteId(null)
+          },
+          [setNoteColor],
+        )
 
         var togglePin = useCallback(function (id) {
           if (!findIn(latestStore.current.notes, id)) return
@@ -2382,6 +2497,8 @@
                     onClick: function () {
                       setView('all')
                       setQuery('')
+                      setColorFilter(null)
+                      setColorMenuOpen(false)
                     },
                   },
                   t('filter.all') + ' ' + activeNotes.length,
@@ -2398,6 +2515,8 @@
                         onClick: function () {
                           setView('session')
                           setQuery('')
+                          setColorFilter(null)
+                          setColorMenuOpen(false)
                         },
                       },
                       t('filter.session') + ' ' + sessionNotes.length,
@@ -2413,6 +2532,8 @@
                     onClick: function () {
                       setView('archived')
                       setQuery('')
+                      setColorFilter(null)
+                      setColorMenuOpen(false)
                     },
                   },
                   t('filter.archived') + ' ' + archivedNotes.length,
@@ -2423,6 +2544,69 @@
             ? h(
                 'div',
                 { className: 'dsn-search', role: 'search' },
+                // 颜色筛选：和搜索同属「找东西」，所以放在搜索框左侧——不另起一排常驻图例，
+                // 首屏仍然留给列表。选中后按钮变成「色点 + 色名」，色名就是非颜色通道。
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className:
+                      'dsn-color-trigger' +
+                      (colorFilter ? ' is-active dsn-c-' + colorFilter : '') +
+                      (colorMenuOpen ? ' is-open' : ''),
+                    title: colorFilter ? t('color.current') + colorName(t, colorFilter) : t('color.filter'),
+                    'aria-label': colorFilter ? t('color.current') + colorName(t, colorFilter) : t('color.filter'),
+                    'aria-haspopup': 'true',
+                    'aria-expanded': colorMenuOpen ? 'true' : 'false',
+                    onClick: function () {
+                      setColorMenuOpen(!colorMenuOpen)
+                    },
+                  },
+                  h('span', { className: 'dsn-color-dot' }),
+                  colorFilter ? h('span', { className: 'dsn-color-trigger-name' }, colorName(t, colorFilter)) : null,
+                ),
+                colorMenuOpen
+                  ? h(
+                      'div',
+                      { className: 'dsn-color-menu', role: 'group', 'aria-label': t('color.filter') },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsn-color-item' + (colorFilter ? '' : ' is-current'),
+                          'aria-pressed': colorFilter ? 'false' : 'true',
+                          onClick: function () {
+                            setColorFilter(null)
+                            setColorMenuOpen(false)
+                          },
+                        },
+                        h('span', { className: 'dsn-color-item-dot' }),
+                        h('span', { className: 'dsn-color-item-label' }, t('color.any')),
+                        h('span', { className: 'dsn-color-item-count' }, String(colorCounts.all)),
+                      ),
+                      COLOR_IDS.map(function (colorId) {
+                        var selected = colorFilter === colorId
+                        var count = colorCounts[colorId] || 0
+                        return h(
+                          'button',
+                          {
+                            key: colorId,
+                            type: 'button',
+                            className:
+                              'dsn-color-item dsn-c-' + colorId + (selected ? ' is-current' : '') + (count === 0 ? ' is-empty' : ''),
+                            'aria-pressed': selected ? 'true' : 'false',
+                            onClick: function () {
+                              setColorFilter(colorId)
+                              setColorMenuOpen(false)
+                            },
+                          },
+                          h('span', { className: 'dsn-color-item-dot' }),
+                          h('span', { className: 'dsn-color-item-label' }, colorName(t, colorId)),
+                          h('span', { className: 'dsn-color-item-count' }, String(count)),
+                        )
+                      }),
+                    )
+                  : null,
                 h('span', { className: 'dsn-search-icon' }, IconSearch(14)),
                 h('input', {
                   ref: searchRef,
@@ -2498,8 +2682,8 @@
               ? h(
                   'div',
                   { className: 'dsn-empty' },
-                  h('div', { className: 'dsn-empty-title' }, search.active ? t('empty.search') : view === 'archived' ? t('empty.archived') : view === 'session' ? t('empty.session') : t('empty.none')),
-                  h('div', { className: 'dsn-empty-sub' }, search.active ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : view === 'session' ? t('empty.session.sub') : t('empty.none.sub')),
+                  h('div', { className: 'dsn-empty-title' }, filterActive ? t('empty.search') : view === 'archived' ? t('empty.archived') : view === 'session' ? t('empty.session') : t('empty.none')),
+                  h('div', { className: 'dsn-empty-sub' }, filterActive ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : view === 'session' ? t('empty.session.sub') : t('empty.none.sub')),
                 )
               : filteredNotes.map(function (note) {
                   var cardProps = {
@@ -2518,7 +2702,7 @@
                     onDragStart: startDrag,
                     onDrop: dropOn,
                     onMoveBy: moveBy,
-                    onCycleColor: cycleColor,
+                    onColor: togglePalette,
                     onTogglePin: togglePin,
                     onArchive: archiveNote,
                     onUnarchive: unarchiveNote,
@@ -2529,6 +2713,11 @@
                   if (activeSessionId && note.sessionId && note.sessionId !== activeSessionId) {
                     cardProps.sourceTitle = (sessionTitles && sessionTitles[note.sessionId]) || t('note.source.unknown')
                     cardProps.onOpenSource = openSource
+                  }
+                  // 调色板同理：只给「正在选色的那一张」加 prop，其他卡片保持原形状。
+                  if (paletteId && paletteId === note.id && note.archived !== true) {
+                    cardProps.paletteOpen = true
+                    cardProps.onPickColor = chooseColor
                   }
                   return h(NoteCardMemo, cardProps)
                 }),
@@ -2634,9 +2823,28 @@
         '.dsn-input{width:100%;resize:none;border:1px solid var(--dsn-line);border-radius:11px;padding:9px 11px;font:inherit;font-size:13px;line-height:1.55;background:rgba(127,127,127,.08);color:inherit;transition:border-color .12s ease,box-shadow .12s ease}',
         '.dsn-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
         '.dsn-input:focus{outline:none;border-color:var(--dsn-accent);box-shadow:0 0 0 3px rgba(127,127,127,.2)}',
-        '.dsn-search{display:flex;align-items:center;gap:6px;margin:0 14px 8px;padding:0 6px 0 9px;border:1px solid var(--dsn-line);border-radius:9px;background:rgba(127,127,127,.06);min-height:32px}',
+        '.dsn-search{position:relative;display:flex;align-items:center;gap:6px;margin:0 14px 8px;padding:0 6px 0 9px;border:1px solid var(--dsn-line);border-radius:9px;background:rgba(127,127,127,.06);min-height:32px}',
         '.dsn-search:focus-within{border-color:var(--dsn-accent)}',
         '.dsn-search-icon{display:grid;place-items:center;color:var(--dsn-fg-2);flex:0 0 auto}',
+        // 颜色筛选触发器：平时是一个 12px 色点，选中后变成「色点 + 色名」。
+        // 色名是必须的——颜色不能作为唯一信息通道（WCAG 1.4.1），读屏和色盲都靠它。
+        '.dsn-color-trigger{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;min-height:24px;padding:2px 6px;border:0;border-radius:7px;background:transparent;color:var(--dsn-fg-2);font:inherit;font-size:11px;cursor:pointer;transition:background .12s ease,color .12s ease}',
+        '.dsn-color-trigger:hover{background:rgba(127,127,127,.16);color:var(--dsn-fg)}',
+        '.dsn-color-trigger:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-color-trigger.is-active{background:rgba(127,127,127,.16);color:var(--dsn-fg)}',
+        '.dsn-color-dot{width:12px;height:12px;border-radius:50%;background:var(--dsn-sticky,transparent);box-shadow:0 0 0 1.5px var(--dsn-ring)}',
+        '.dsn-color-trigger-name{white-space:nowrap;max-width:52px;overflow:hidden;text-overflow:ellipsis}',
+        // 颜色菜单是浮层：面板本身不滚动（只有列表滚），所以不会被裁。
+        '.dsn-color-menu{position:absolute;left:0;top:calc(100% + 4px);z-index:5;min-width:148px;padding:4px;border:1px solid var(--dsn-line);border-radius:10px;background:var(--dsn-surface);box-shadow:0 10px 26px rgba(0,0,0,.18)}',
+        '.dsn-color-item{display:flex;align-items:center;gap:7px;width:100%;min-height:28px;padding:3px 7px;border:0;border-radius:7px;background:transparent;color:var(--dsn-fg);font:inherit;font-size:11.5px;text-align:left;cursor:pointer}',
+        '.dsn-color-item:hover{background:rgba(127,127,127,.14)}',
+        '.dsn-color-item:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-color-item.is-current{background:rgba(127,127,127,.18);font-weight:600}',
+        '.dsn-color-item.is-empty{opacity:.55}',
+        '.dsn-color-item-dot{width:12px;height:12px;border-radius:50%;flex:0 0 auto;background:var(--dsn-sticky,transparent);box-shadow:0 0 0 1.5px var(--dsn-ring)}',
+        '.dsn-color-item.is-current .dsn-color-item-dot{box-shadow:0 0 0 2px var(--dsn-surface),0 0 0 3.5px var(--dsn-accent)}',
+        '.dsn-color-item-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.dsn-color-item-count{flex:0 0 auto;font-size:10.5px;color:var(--dsn-fg-2);font-variant-numeric:tabular-nums}',
         '.dsn-search-input{flex:1 1 auto;min-width:0;border:0;background:transparent;color:inherit;font:inherit;font-size:12.5px;padding:6px 0;outline:none}',
         '.dsn-search-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
         '.dsn-search-input::-webkit-search-cancel-button{display:none}',
@@ -2711,7 +2919,17 @@
         '.dsn-dot-btn::after{content:"";width:12px;height:12px;border-radius:50%;background:var(--dsn-sticky);box-shadow:0 0 0 1.5px var(--dsn-ring);transition:transform .12s ease}',
         '.dsn-dot-btn:hover{background:rgba(127,127,127,.16)}',
         '.dsn-dot-btn:hover::after{transform:scale(1.14)}',
+        '.dsn-dot-btn.is-open{background:rgba(127,127,127,.18)}',
         '.dsn-dot-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        // 调色板：内联展开在卡片底部（不做浮层），所以不会被列表滚动裁掉，也不用算定位。
+        '.dsn-palette{display:flex;gap:2px;margin:2px 0 1px;padding:4px 0 2px;border-top:1px dashed var(--dsn-line)}',
+        '.dsn-palette-option{display:flex;flex-direction:column;align-items:center;gap:3px;flex:1 1 0;min-width:0;padding:3px 0;border:0;border-radius:7px;background:transparent;color:var(--dsn-fg-2);font:inherit;cursor:pointer}',
+        '.dsn-palette-option:hover{background:rgba(127,127,127,.14);color:var(--dsn-fg)}',
+        '.dsn-palette-option:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-palette-option.is-current{background:rgba(127,127,127,.12);color:var(--dsn-fg)}',
+        '.dsn-palette-swatch{width:16px;height:16px;border-radius:50%;background:var(--dsn-sticky);box-shadow:0 0 0 1.5px var(--dsn-ring)}',
+        '.dsn-palette-option.is-current .dsn-palette-swatch{box-shadow:0 0 0 2px var(--dsn-surface),0 0 0 3.5px var(--dsn-accent)}',
+        '.dsn-palette-name{max-width:100%;font-size:9px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
         '.dsn-note-foot .dsn-icon-btn{width:28px;height:28px;border-radius:7px}',
         '.dsn-empty{padding:26px 12px;text-align:center;line-height:1.8}',
         '.dsn-empty-title{font-size:13px;font-weight:650;color:var(--dsn-fg)}',
