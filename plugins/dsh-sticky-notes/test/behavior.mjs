@@ -46,6 +46,9 @@ let timers = new Map()
 let timerSeq = 0
 let focusedElement = null
 let lastBlob = null
+// 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
+let passCardRenders = 0
+let maxPassCardRenders = 0
 
 function createElement(type, rawProps, ...children) {
   const props = Object.assign({}, rawProps || {})
@@ -102,12 +105,71 @@ const fakeReact = {
     if (!changed) return
     pendingEffects.push({ index, callback, deps })
   },
-  useMemo(factory) {
-    return factory()
+  useMemo(factory, deps) {
+    const index = cursor++
+    const slot = hookSlots[index]
+    if (slot && slot.__memo && deps && sameDeps(slot.deps, deps)) return slot.value
+    const value = factory()
+    hookSlots[index] = { __memo: true, deps: deps || null, value: value }
+    return value
   },
-  useCallback(fn) {
+  useCallback(fn, deps) {
+    const index = cursor++
+    const slot = hookSlots[index]
+    if (slot && slot.__memo && deps && sameDeps(slot.deps, deps)) return slot.value
+    hookSlots[index] = { __memo: true, deps: deps || null, value: fn }
     return fn
   },
+  // memo 也要有真语义：命中缓存时把上次渲染出的子树重新「提交」一遍，
+  // 这样断言看到的元素清单跟 React 里渲染结果一致，而 memo 带来的「陈旧 props」问题也能被测出来。
+  memo(component) {
+    const wrapper = (props) => {
+      let byKey = memoCache.get(component)
+      if (!byKey) {
+        byKey = new Map()
+        memoCache.set(component, byKey)
+      }
+      const id = props.key === undefined ? '' : String(props.key)
+      const entry = byKey.get(id)
+      if (entry && shallowEqual(entry.props, props)) {
+        emitTree(entry.result)
+        return entry.result
+      }
+      const result = component(props)
+      byKey.set(id, { props: props, result: result })
+      passCardRenders += 1
+      return result
+    }
+    return wrapper
+  },
+}
+
+let memoCache = new WeakMap()
+
+function sameDeps(a, b) {
+  if (!a || !b || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) if (!Object.is(a[i], b[i])) return false
+  return true
+}
+
+function shallowEqual(a, b) {
+  if (a === b) return true
+  const keysA = Object.keys(a)
+  const keysB = Object.keys(b)
+  if (keysA.length !== keysB.length) return false
+  for (const key of keysA) if (!Object.is(a[key], b[key])) return false
+  return true
+}
+
+// 把一棵已经构造好的元素树重新登记到 elements（模拟 React 复用上次的渲染结果）。
+function emitTree(node) {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const item of node) emitTree(item)
+    return
+  }
+  if (typeof node.type === 'string') elements.push(node)
+  if (node.props) emitTree(node.props.children)
 }
 
 const sandbox = {
@@ -192,9 +254,11 @@ mod.apply(ctx)
 
 function renderPass() {
   cursor = 0
+  passCardRenders = 0
   elements = []
   pendingEffects = []
   registered.component()
+  if (passCardRenders > maxPassCardRenders) maxPassCardRenders = passCardRenders
   const effects = pendingEffects
   for (const effect of effects) {
     const previous = effectSlots[effect.index]
@@ -235,6 +299,7 @@ function advance(ms) {
 }
 
 function act(mutate) {
+  maxPassCardRenders = 0
   mutate()
   flush()
 }
@@ -269,6 +334,7 @@ check('初始排序按最近改动降序', cardTexts(), EXPECTED_ORDER)
 // 1. 编辑最后一条：打字过程中不许重排
 act(() => cards()[2].props.onChange({ target: { value: '旧的一条（改到一半）' } }))
 check('编辑途中列表不重排', cardTexts(), ['最新那条', '中间那条', '旧的一条（改到一半）'])
+check('打字只重渲染正在编辑的那 1 张卡片', maxPassCardRenders, 1)
 act(() => cards()[2].props.onChange({ target: { value: '旧的一条（改完）' } }))
 check('连续输入仍然不重排', cardTexts(), ['最新那条', '中间那条', '旧的一条（改完）'])
 

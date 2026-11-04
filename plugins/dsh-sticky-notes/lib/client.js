@@ -44,6 +44,7 @@
 
       var h = React.createElement
       var useCallback = React.useCallback
+      var memo = typeof React.memo === 'function' ? React.memo : function (component) { return component }
       var useEffect = React.useEffect
       var useMemo = React.useMemo
       var useRef = React.useRef
@@ -804,6 +805,11 @@
         )
       }
 
+      // 一张卡片要构造 textarea + 时间 + 5 个按钮，整列表重渲染时最贵的就是它。
+      // memo 住之后：打字只有正在编辑的那张重渲染，其余按 props 浅比较跳过。
+      // 前提是父组件传下来的 note / t / timeLabels / 回调引用保持稳定（见主组件里的 useMemo/useCallback）。
+      var NoteCardMemo = memo(NoteCard)
+
       // ---------------------------------------------------------------- 主组件
 
       function StickyNotesOverlay(props) {
@@ -839,7 +845,7 @@
         // 最新一份状态，供「刷新/卸载前补写」这类拿不到闭包的路径读取。
         var latestStore = useRef(store)
         // 语言切换时重渲染一次，让 t() 重新绑定当前语言。
-        var [, setLocaleTick] = useState(0)
+        var [localeTick, setLocaleTick] = useState(0)
 
         // 订阅语言切换；t 在每次渲染重新绑定，保证切换后立刻生效。
         useEffect(
@@ -860,21 +866,34 @@
           [locale],
         )
 
-        var t = fallbackT
-        if (locale && typeof locale.bind === 'function') {
-          try {
-            var boundT = locale.bind(NS)
-            if (typeof boundT === 'function') t = wrapT(boundT)
-          } catch (error) {
-            console.warn('[dsh-sticky-notes] locale.bind 失败，改用内置中文：', error && error.message)
-          }
-        }
+        // t / timeLabels 要 memo 住：它们是 memo(NoteCard) 的 props，
+        // 每次渲染换个新函数/新对象就会让所有卡片白渲染一遍。
+        var t = useMemo(
+          function () {
+            var bound = fallbackT
+            if (locale && typeof locale.bind === 'function') {
+              try {
+                var boundT = locale.bind(NS)
+                if (typeof boundT === 'function') bound = wrapT(boundT)
+              } catch (error) {
+                console.warn('[dsh-sticky-notes] locale.bind 失败，改用内置中文：', error && error.message)
+              }
+            }
+            return bound
+          },
+          [locale, localeTick],
+        )
 
-        var timeLabels = {
-          justNow: t('time.justNow'),
-          minutesAgo: t('time.minutesAgo'),
-          hoursAgo: t('time.hoursAgo'),
-        }
+        var timeLabels = useMemo(
+          function () {
+            return {
+              justNow: t('time.justNow'),
+              minutesAgo: t('time.minutesAgo'),
+              hoursAgo: t('time.hoursAgo'),
+            }
+          },
+          [t],
+        )
 
         var open = store.open
         var notes = useMemo(
@@ -1199,14 +1218,16 @@
           recordMetric('create')
         }, [])
 
-        function findNote(id) {
-          for (var i = 0; i < store.notes.length; i += 1) {
-            if (store.notes[i].id === id) return store.notes[i]
+        // 下面这些回调都会作为 memo(NoteCard) 的 props：引用必须稳定，否则 memo 全部失效。
+        // 所以统一 useCallback([])，并且**不闭包 store** —— 需要「当前列表」时读 latestStore。
+        function findIn(list, id) {
+          for (var i = 0; i < list.length; i += 1) {
+            if (list[i].id === id) return list[i]
           }
           return null
         }
 
-        function updateNote(id, text) {
+        var updateNote = useCallback(function (id, text) {
           setStore(function (prev) {
             var changed = false
             var next = prev.notes.map(function (note) {
@@ -1225,13 +1246,13 @@
             editedInSession.current[id] = true
             recordMetric('edit')
           }
-        }
+        }, [])
 
         // 编辑结束（失焦）才把这条便签标记成「刚改过」。没真改动过的点击不算。
-        function commitNote(id) {
+        var commitNote = useCallback(function (id) {
           if (touchedSinceFocus.current[id] !== true) return
           delete touchedSinceFocus.current[id]
-          var target = findNote(id)
+          var target = findIn(latestStore.current.notes, id)
           if (!target || target.archived === true) return
           var now = Date.now()
           setStore(function (prev) {
@@ -1241,9 +1262,9 @@
             })
             return { notes: next, open: prev.open }
           })
-        }
+        }, [])
 
-        function cycleColor(id) {
+        var cycleColor = useCallback(function (id) {
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
@@ -1253,10 +1274,10 @@
             })
             return { notes: next, open: prev.open }
           })
-        }
+        }, [])
 
-        function togglePin(id) {
-          if (!findNote(id)) return
+        var togglePin = useCallback(function (id) {
+          if (!findIn(latestStore.current.notes, id)) return
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
@@ -1265,10 +1286,10 @@
             return { notes: next, open: prev.open }
           })
           recordMetric('pin')
-        }
+        }, [])
 
-        function archiveNote(id) {
-          if (!findNote(id)) return
+        var archiveNote = useCallback(function (id) {
+          if (!findIn(latestStore.current.notes, id)) return
           var now = Date.now()
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
@@ -1278,10 +1299,10 @@
             return { notes: next, open: prev.open }
           })
           recordMetric('archive')
-        }
+        }, [])
 
-        function unarchiveNote(id) {
-          if (!findNote(id)) return
+        var unarchiveNote = useCallback(function (id) {
+          if (!findIn(latestStore.current.notes, id)) return
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
@@ -1290,7 +1311,7 @@
             return { notes: next, open: prev.open }
           })
           recordMetric('unarchive')
-        }
+        }, [])
 
         // 底部提示条只有一个通道，三种文案：删除了 / 导入了 / 出错了。
         function toastText(pending) {
@@ -1314,15 +1335,15 @@
         }
 
         // 删除立即生效，但给 5 秒撤销窗口：比「再点一次确认」更不打断思路，也更可逆。
-        function removeNote(id) {
-          var target = findNote(id)
+        var removeNote = useCallback(function (id) {
+          var target = findIn(latestStore.current.notes, id)
           if (!target) return
           setStore(function (prev) {
             return { notes: prev.notes.filter(function (note) { return note.id !== id }), open: prev.open }
           })
           showToast({ kind: 'delete', note: target }, UNDO_MS)
           recordMetric('delete')
-        }
+        }, [])
 
         function undoAction() {
           var pending = undoState
@@ -1661,7 +1682,7 @@
                   h('div', { className: 'dsn-empty-sub' }, query ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : t('empty.none.sub')),
                 )
               : filteredNotes.map(function (note) {
-                  return h(NoteCard, {
+                  return h(NoteCardMemo, {
                     key: note.id,
                     note: note,
                     tick: tick,
