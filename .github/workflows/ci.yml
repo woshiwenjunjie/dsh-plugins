@@ -16,5 +16,16 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-      - name: 校验全部插件（结构 + 语法 + 冒烟）
+      - name: 校验全部插件（结构 + 语法 + 冒烟 + 行为 + 对比度）
         run: node scripts/check.mjs
+
+  pack:
+    # 打包自检：发布前唯一能离线验证「别人装上会拿到什么」的一步。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: npm pack 自检（必需文件 / 不该进包的文件 / icon 上限 / entry id）
+        run: node scripts/pack-check.mjs --list

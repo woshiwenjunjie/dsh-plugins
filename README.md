@@ -37,17 +37,23 @@ dsh-plugins/
 │       ├── test/             # 冒烟测试 + 预览生成
 │       ├── cordis.patch.yml  # bundle 挂载声明
 │       └── package.json      # 版本、市场元数据、dsh.bundle / dsh.client
-├── scripts/check.mjs         # 全仓库校验（语法 + 每个插件的冒烟测试）
+├── scripts/check.mjs         # 全仓库校验（语法 + 每个插件的冒烟/行为/对比度测试）
+├── scripts/pack-check.mjs    # 打包自检（npm pack 出来的包该有什么、不该有什么）
 ├── templates/plugin/         # 新插件骨架
 ├── docs/                     # 插件开发与发布指南
-└── .github/workflows/ci.yml  # CI：push / PR 在 Node 22、24 上跑校验
+└── .github/workflows/ci.yml  # CI：push / PR 跑校验 + 打包自检
 ```
 
 ## CI
 
-每次 push 到 `main` 或开 PR，GitHub Actions 会在 Node 22 与 24 上跑 `node scripts/check.mjs`
-（包结构 + `client.js` 语法 + 每个插件的冒烟测试），不通过视为红灯。工作流见
-[.github/workflows/ci.yml](.github/workflows/ci.yml)。
+每次 push 到 `main` 或开 PR，GitHub Actions 跑两个 job：
+
+- `check`（Node 22 / 24 矩阵）：`node scripts/check.mjs` —— 包结构 + `client.js` 语法 +
+  每个插件的冒烟 / 行为 / 对比度测试；
+- `pack`：`node scripts/pack-check.mjs` —— 真的 `npm pack` 一遍，确认包里缺什么、
+  混进了什么不该进的东西。
+
+工作流见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 > 推送 `.github/workflows/` 需要 GitHub token 带 `workflow` scope（`gh auth refresh -s workflow`）。
 
@@ -55,7 +61,8 @@ dsh-plugins/
 
 每个插件在合入前都要过：
 
-- `node scripts/check.mjs` —— 所有插件的 `lib/client.js` 语法检查 + 冒烟测试；
+- `node scripts/check.mjs` —— 所有插件的 `lib/client.js` 语法检查 + 冒烟 / 行为 / 对比度测试；
+- `node scripts/pack-check.mjs` —— 打包自检（tarball 内容、icon 上限、entry id 与包名一致）；
 - 视觉用 `plugins/<name>/test/preview.mjs` 生成静态预览页核对（浅色 / 深色 / 收起态）；
 - 交互变更在真实 DSH 页面里点过一遍。
 

@@ -43,7 +43,8 @@
     "contrast": "node test/contrast.mjs",
     "perf": "node test/perf.mjs 300 60",
     "preview": "node test/preview.mjs",
-    "check": "node ../../scripts/check.mjs"
+    "check": "node ../../scripts/check.mjs",
+    "prepublishOnly": "node ../../scripts/check.mjs && node ../../scripts/pack-check.mjs"
   },
   "engines": {
     "node": ">=22.12.0",

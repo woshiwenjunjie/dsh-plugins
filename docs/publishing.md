@@ -21,9 +21,15 @@
 ## 2. 发布前检查
 
 ```bash
-node scripts/check.mjs          # 结构 + 语法 + 冒烟，必须 0 退出
+node scripts/check.mjs                 # 结构 + 语法 + 冒烟 + 行为 + 对比度，必须 0 退出
+node scripts/pack-check.mjs --list     # npm pack 自检：包里该有的都有、不该进包的一件没混进去
 node plugins/<name>/test/preview.mjs   # 生成预览页，浅色/深色各看一眼
 ```
+
+`pack-check` 检查的是 **tarball**，`check` 检查的是源码树——两者的差异（漏了 `lib`、
+`test/` 混进去、icon 超 256KiB、`cordis.patch.yml` 的 `id` 与包名不一致或带行尾注释）
+只有打包才暴露。它还会把包解开，确认 `exports["./client"]` 指向的文件真的在里面。
+CI 里有一个独立的 `pack` job 跑它（见 `.github/workflows/ci.yml`）。
 
 再在真实 DSH 里走一遍（这是唯一能验证「装进去能不渲染」的环节）：
 
@@ -53,8 +59,17 @@ dsh plugin --profile web add link:<绝对路径>/plugins/<name>
 市场安装依赖 npm 包名（`dsh plugin --profile web add <pkg>`），所以先发布：
 
 ```bash
+npm login                              # 只需一次；CI/自动化用 granular token
 cd plugins/<name>
 npm publish --access public
+```
+
+发布后自查（不用等别人反馈）：
+
+```bash
+npm view <pkg> version dist.tarball    # 版本与产物地址
+npm view <pkg> dsh                     # dsh.bundle / dsh.client 元数据还在
+dsh plugin --profile web add <pkg>     # 用干净 profile 从 npm 装一次
 ```
 
 发布前确认：
@@ -99,11 +114,15 @@ npm publish --access public
 
 ## 7. 自动化（可选）
 
-`.github/workflows/ci.yml` 已在每次 push / PR 跑 `node scripts/check.mjs`（Node 22/24 两个矩阵）。
-如果之后要自动发布，建议：
+`.github/workflows/ci.yml` 每次 push / PR 跑两个 job：
+
+- `check`（Node 22/24 矩阵）：`node scripts/check.mjs`；
+- `pack`：`node scripts/pack-check.mjs`（真的 `npm pack` 一遍检查产物）。
+
+插件的 `prepublishOnly` 已经接上了 `check.mjs` + `pack-check.mjs`，所以 `npm publish`
+之前会自动过一遍，不会把漏文件/元数据错的包发出去。如果之后要自动发布，建议：
 
 - 只在打 tag 时触发，且 `npm publish` 用 granular token（权限最小化）；
-- 发布前强制跑 `scripts/check.mjs`；
-- 给插件加 `prepublishOnly` 脚本做最后一次校验。
+- 发布前强制跑 `scripts/check.mjs` 与 `scripts/pack-check.mjs`（现在由 `prepublishOnly` 保证）。
 
 > 推送 `.github/workflows/` 需要 token 带 `workflow` scope：`gh auth refresh -s workflow`。
