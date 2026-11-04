@@ -63,7 +63,18 @@ function createElement(type, rawProps, ...children) {
     if (type.prototype && typeof type.prototype.render === 'function') return new type(props).render()
     return type(props)
   }
-  const element = { type, props, style: {}, scrollHeight: 0, setAttribute() {}, appendChild() {}, remove() {} }
+  const element = {
+    type,
+    props,
+    style: {},
+    scrollHeight: 0,
+    setAttribute() {},
+    appendChild() {},
+    remove() {},
+    // 拖拽排序要用：元素在视口里的位置 + class 操作（组件里都是带存在性判断的）。
+    getBoundingClientRect: () => ({ top: 0, height: 100, bottom: 100, left: 0, right: 200, width: 200 }),
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+  }
   // 和 React 一样：DOM 元素的 ref 指向元素本身；给个 focus 用来验证焦点归还。
   if (props.ref && typeof props.ref === 'object') {
     props.ref.current = element
@@ -378,11 +389,14 @@ check('打字只重渲染正在编辑的那 1 张卡片', maxPassCardRenders, 1)
 act(() => cards()[2].props.onChange({ target: { value: '旧的一条（改完）' } }))
 check('连续输入仍然不重排', cardTexts(), ['最新那条', '中间那条', '旧的一条（改完）'])
 
-// 2. 失焦才置顶
+// 2. 顺序是「手动排的」：编辑 + 失焦都不该打乱它（只更新「最近改动」时间）
 act(() => cards()[2].props.onBlur())
-check('失焦后刚改的便签排到最前', cardTexts(), ['旧的一条（改完）', '最新那条', '中间那条'])
+check('失焦后顺序不变（编辑不打乱手动顺序）', cardTexts(), ['最新那条', '中间那条', '旧的一条（改完）'])
+advance(300)
+const afterBlur = JSON.parse(storage.get('dsh-sticky-notes:v1')).notes.find((note) => note.id === 'n-old')
+check('失焦仍会更新「最近改动」时间', afterBlur.updatedAt > afterBlur.createdAt, true)
 
-// 2b. 只点进去再点出来（没改过）不许重排
+// 2b. 只点进去再点出来（没改过）也不重排
 const orderBeforeBlur = cardTexts()
 act(() => cards()[2].props.onBlur())
 check('没改过就失焦不重排', cardTexts(), orderBeforeBlur)
@@ -562,7 +576,7 @@ const roundTripSeed = [
 remount(roundTripSeed)
 
 act(() => menuButton().props.onClick({}))
-check('「更多」菜单有两个备份项', menuItems().length, 2)
+check('「更多」菜单有三项（备份 / 恢复 / 重排）', menuItems().length, 3)
 
 // 导出 → 清空 → 导入，字段要一模一样
 await actAsync(() => menuItems()[0].props.onClick({}))
@@ -710,6 +724,75 @@ check('复制失败如实报错', toastEl() && toastEl().props.children[0].props
 check('失败提示带 is-error', toastEl() && toastEl().props.className, 'dsn-toast is-error')
 clipboardFail = false
 
+// ---------------------------------------------------------------- 手动排序
+
+function articles() {
+  return elements.filter((el) => el.type === 'article')
+}
+function grips() {
+  return elements.filter((el) => el.type === 'button' && el.props.className === 'dsn-grip')
+}
+
+const reorderSeed = [
+  { id: 'r-first', text: '第一条', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+  { id: 'r-second', text: '第二条', color: 'sky', pinned: false, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'r-third', text: '第三条', color: 'mint', pinned: false, createdAt: now - 3000, updatedAt: now - 3000 },
+]
+remount(reorderSeed)
+
+check('排序前顺序', cardTexts(), ['第一条', '第二条', '第三条'])
+check('每张卡片都有拖动把手', grips().length, 3)
+
+// 拖动：把第一条拖到第三条的下半部分 → 插到它后面
+act(() =>
+  grips()[0].props.onDragStart({
+    currentTarget: grips()[0],
+    dataTransfer: { effectAllowed: '', setData() {} },
+  }),
+)
+act(() =>
+  articles()[2].props.onDrop({ preventDefault() {}, currentTarget: articles()[2], clientY: 90 }),
+)
+check('拖到第三条后面', cardTexts(), ['第二条', '第三条', '第一条'])
+
+// 拖到上半部分 → 插到它前面
+act(() => grips()[2].props.onDragStart({ currentTarget: grips()[2], dataTransfer: { setData() {} } }))
+act(() => articles()[0].props.onDrop({ preventDefault() {}, currentTarget: articles()[0], clientY: 10 }))
+check('拖到第一条前面', cardTexts(), ['第一条', '第二条', '第三条'])
+
+// 键盘等价操作：把手聚焦后按 ↑/↓
+act(() => grips()[1].props.onKeyDown({ key: 'ArrowUp', preventDefault() {} }))
+check('键盘 ↑ 上移一格', cardTexts(), ['第二条', '第一条', '第三条'])
+act(() => grips()[0].props.onKeyDown({ key: 'ArrowDown', preventDefault() {} }))
+check('键盘 ↓ 下移一格', cardTexts(), ['第一条', '第二条', '第三条'])
+
+// 落盘后 order 必须和视觉顺序一致；新便签永远落最上面
+advance(300)
+const storedAfterReorder = JSON.parse(storage.get('dsh-sticky-notes:v1')).notes
+const byOrder = storedAfterReorder
+  .slice()
+  .sort((a, b) => a.order - b.order)
+  .map((note) => note.text)
+check('落盘的 order 与视觉顺序一致', byOrder, cardTexts())
+const orderValues = storedAfterReorder.map((note) => note.order)
+check('order 都是数字', orderValues.every((value) => typeof value === 'number' && isFinite(value)), true)
+
+act(() => draftArea().props.onChange({ target: { value: '刚记的' } }))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+check('手动排过之后新便签仍落在最上面', cardTexts()[0], '刚记的')
+advance(300)
+const afterAdd = JSON.parse(storage.get('dsh-sticky-notes:v1')).notes
+
+// 「重排：按最近改动」把顺序复位成时间序
+act(() => grips()[0].props.onDragStart({ currentTarget: grips()[0], dataTransfer: { setData() {} } }))
+act(() => articles()[3].props.onDrop({ preventDefault() {}, currentTarget: articles()[3], clientY: 90 }))
+check('先手动拖乱', cardTexts()[0] !== '刚记的', true)
+act(() => menuButton().props.onClick({}))
+act(() => menuItems()[2].props.onClick({}))
+check('按最近改动重排后最新写在最上面', cardTexts()[0], '刚记的')
+
+check('新便签的 order 比所有人都小', Math.min(...afterAdd.map((note) => note.order)) === afterAdd.find((note) => note.text === '刚记的').order, true)
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -718,5 +801,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定 / 草稿不丢 / 一键复制',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
 )

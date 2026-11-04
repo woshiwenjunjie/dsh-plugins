@@ -40,6 +40,7 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | 全局开关 | `Alt + Shift + N` |
 | 记下一条 | 顶部输入框，`Ctrl/Cmd + Enter` 或点「记下」 |
 | 复制一条 | 鼠标移到便签上（或键盘聚焦卡片）→ 右下角出现复制按钮 |
+| 排序 | 拖卡片左边缘的把手（hover 显现）；或聚焦把手按 `↑` / `↓`；`⋯` → 「重排：按最近改动」复位 |
 | 编辑 / 换色 / 置顶 / 归档 / 删除 | 每条便签下方的一排按钮 |
 | 撤销删除 | 删除后 5 秒内点底部「撤销」 |
 | 搜索 | 便签 ≥ 6 条时出现搜索框，`Ctrl/Cmd + K` 聚焦；搜全部便签（含已归档），命中片段高亮 |
@@ -166,7 +167,7 @@ dsh plugin --profile web add link:<本目录绝对路径>
 
 | key | 内容 |
 |---|---|
-| `dsh-sticky-notes:v1` | 便签列表（含置顶 / 归档 / 会话字段，多标签页之间同步） |
+| `dsh-sticky-notes:v1` | 便签列表（含置顶 / 归档 / 会话 / 手动顺序字段，多标签页之间同步） |
 | `dsh-sticky-notes:open` | 面板开合状态（只属于当前页） |
 | `dsh-sticky-notes:draft` | 还没按「记下」的草稿（记下后立即清掉） |
 | `dsh-sticky-notes:metrics:v1` | 本机埋点计数（导出 Markdown 时附在末尾） |

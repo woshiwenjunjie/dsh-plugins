@@ -87,6 +87,11 @@
           sessionId: typeof raw.sessionId === 'string' && raw.sessionId ? raw.sessionId : null,
           createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : now,
           updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : now,
+          // 手动排序位。老数据用 -updatedAt，正好等价于以前「最近改动在前」。
+          order:
+            typeof raw.order === 'number' && isFinite(raw.order)
+              ? raw.order
+              : -(typeof raw.updatedAt === 'number' ? raw.updatedAt : now),
         }
       }
 
@@ -155,8 +160,9 @@
 
       function sortNotes(notes) {
         return notes.slice().sort(function (a, b) {
-          // 置顶的永远在上；同组里按最近改动排。
+          // 置顶的永远在上；组内按手动顺序，没排过的（老数据）自然按时间倒序。
           if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1
+          if (a.order !== b.order) return a.order - b.order
           return b.updatedAt - a.updatedAt
         })
       }
@@ -319,7 +325,8 @@
         'sub.empty': '随手记',
         unit: '条',
         export: '导出为 Markdown',
-        'menu.more': '备份与恢复',
+        'menu.more': '更多操作',
+        'menu.resort': '重排：按最近改动',
         'menu.backup': '导出备份（JSON）',
         'menu.restore': '从备份恢复…',
         'toast.imported': '已导入',
@@ -350,6 +357,7 @@
         'note.aria': '便签内容',
         'note.edit': '点一下编辑',
         'note.copy': '复制这条便签',
+        'note.reorder': '拖动排序（键盘可用 ↑ ↓）',
         'note.pinned': '置顶',
         'note.pin': '置顶这条便签',
         'note.unpin': '取消置顶',
@@ -387,7 +395,8 @@
         'sub.empty': 'Jot something',
         unit: 'notes',
         export: 'Export as Markdown',
-        'menu.more': 'Backup & restore',
+        'menu.more': 'More actions',
+        'menu.resort': 'Re-sort: by last edited',
         'menu.backup': 'Export backup (JSON)',
         'menu.restore': 'Restore from backup…',
         'toast.imported': 'Imported',
@@ -418,6 +427,7 @@
         'note.aria': 'Note content',
         'note.edit': 'Click to edit',
         'note.copy': 'Copy this note',
+        'note.reorder': 'Drag to reorder (or ↑ ↓)',
         'note.pinned': 'Pinned',
         'note.pin': 'Pin this note',
         'note.unpin': 'Unpin this note',
@@ -618,6 +628,18 @@
       }
 
       // 一键复制：把这条便签原样放进系统剪贴板（常用来贴到别处或对话输入框）。
+      // 拖动把手：两列小圆点（竖向抓握感的通用符号）。
+      function IconGrip(size) {
+        return pick('IconReOrderDotsVerticalRegular', function (s) {
+          return svg(
+            [
+              h('path', { key: 'a', d: 'M10 6h.01M14 6h.01M10 12h.01M14 12h.01M10 18h.01M14 18h.01' }),
+            ],
+            s,
+          )
+        }, size)
+      }
+
       function IconCopy(size) {
         return pick('IconCopyOutlineRegular', function (s) {
           return svg(
@@ -809,6 +831,72 @@
         return out
       }
 
+      // ---------------------------------------------------------------- 手动排序
+      //
+      // 每条便签有一个 order（升序 = 从上到下）。新建取 min-1（落在最上面），
+      // 老数据没有 order 时用 -updatedAt，正好等价于以前「最近改动在前」的行为。
+      function nextOrder(notes) {
+        var min = null
+        for (var i = 0; i < notes.length; i += 1) {
+          var value = notes[i].order
+          if (typeof value === 'number' && isFinite(value) && (min === null || value < min)) min = value
+        }
+        return min === null ? 0 : min - 1
+      }
+
+      /** 按给定顺序整体重编号（步进 10）：拖动和「按时间重排」共用。 */
+      function renumber(order) {
+        var result = []
+        for (var i = 0; i < order.length; i += 1) {
+          var note = order[i]
+          result.push({
+            id: note.id,
+            text: note.text,
+            color: note.color,
+            pinned: note.pinned,
+            archived: note.archived,
+            archivedAt: note.archivedAt,
+            sessionId: note.sessionId,
+            createdAt: note.createdAt,
+            updatedAt: note.updatedAt,
+            order: i * 10,
+          })
+        }
+        return result
+      }
+
+      /**
+       * 把 fromId 挪到 toId 前面（after=false）或后面（after=true），整份重编号。
+       * 拖动一次写一次、O(n)，换来顺序稳定、不用处理小数精度。
+       */
+      function reorderNotes(notes, fromId, toId, after) {
+        var ordered = sortNotes(notes)
+        var from = -1
+        var to = -1
+        for (var i = 0; i < ordered.length; i += 1) {
+          if (ordered[i].id === fromId) from = i
+          if (ordered[i].id === toId) to = i
+        }
+        if (from === -1 || to === -1 || from === to) return null
+        var list = ordered.slice()
+        var moved = list.splice(from, 1)[0]
+        var insertAt = from < to ? to - 1 : to
+        if (after) insertAt += 1
+        if (insertAt < 0) insertAt = 0
+        if (insertAt > list.length) insertAt = list.length
+        list.splice(insertAt, 0, moved)
+        return renumber(list)
+      }
+
+      /** 放弃手动顺序，按「最近改动」重排（置顶组仍在上面）。 */
+      function resortByTime(notes) {
+        var ordered = notes.slice().sort(function (a, b) {
+          if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1
+          return b.updatedAt - a.updatedAt
+        })
+        return renumber(ordered)
+      }
+
       // ---------------------------------------------------------------- 卡片
 
       function NoteCard(props) {
@@ -824,6 +912,9 @@
         var onTogglePin = props.onTogglePin
         var onArchive = props.onArchive
         var onUnarchive = props.onUnarchive
+        var onDragStart = props.onDragStart
+        var onDrop = props.onDrop
+        var onMoveBy = props.onMoveBy
 
         var archived = note.archived === true
         var query = props.query || ''
@@ -838,7 +929,66 @@
           {
             className:
               'dsn-note dsn-c-' + note.color + (note.pinned && !archived ? ' is-pinned' : '') + (archived ? ' is-archived' : ''),
+            // 拖动时不做 React 状态更新：高亮/半透明直接改 DOM class，
+            // 松手才提交一次顺序。这样拖 500 条也不会因为 rerender 掉帧。
+            onDragOver: function (event) {
+              event.preventDefault()
+              var el = event.currentTarget
+              if (el && el.classList) el.classList.add('is-drop-target')
+            },
+            onDragLeave: function (event) {
+              var el = event.currentTarget
+              if (el && el.classList) el.classList.remove('is-drop-target')
+            },
+            onDrop: function (event) {
+              event.preventDefault()
+              var el = event.currentTarget
+              if (el && el.classList) el.classList.remove('is-drop-target')
+              var after = false
+              if (el && typeof el.getBoundingClientRect === 'function' && typeof event.clientY === 'number') {
+                var rect = el.getBoundingClientRect()
+                after = event.clientY > rect.top + rect.height / 2
+              }
+              if (typeof onDrop === 'function') onDrop(note.id, after)
+            },
           },
+          // 拖动把手：贴着卡片左边缘（原来那条色条的位置），hover / 键盘聚焦时才显现。
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsn-grip',
+              draggable: true,
+              title: t('note.reorder'),
+              'aria-label': t('note.reorder'),
+              onDragStart: function (event) {
+                if (event && event.dataTransfer) {
+                  try {
+                    event.dataTransfer.effectAllowed = 'move'
+                    event.dataTransfer.setData('text/plain', note.id)
+                  } catch (error) {
+                    /* 某些浏览器限制 dataTransfer 写入，拖动本身不受影响 */
+                  }
+                }
+                var el = event && event.currentTarget
+                var card = el && el.parentNode
+                if (card && card.classList) card.classList.add('is-dragging')
+                if (typeof onDragStart === 'function') onDragStart(note.id)
+              },
+              onDragEnd: function (event) {
+                var el = event && event.currentTarget
+                var card = el && el.parentNode
+                if (card && card.classList) card.classList.remove('is-dragging')
+              },
+              // 键盘等价操作：把手聚焦后按 ↑/↓ 移动一格，不逼着用户用鼠标。
+              onKeyDown: function (event) {
+                if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+                event.preventDefault()
+                if (typeof onMoveBy === 'function') onMoveBy(note.id, event.key === 'ArrowUp' ? -1 : 1)
+              },
+            },
+            IconGrip(10),
+          ),
           readingOnly
             ? h(
                 'div',
@@ -995,6 +1145,8 @@
         var menuRef = useRef(null)
         var menuBtnRef = useRef(null)
         var fileRef = useRef(null)
+        // 拖动排序的源 id：拖动过程中只改这个 ref，不触发整列表重渲染。
+        var dragSourceRef = useRef(null)
         var searchRef = useRef(null)
         // 埋点去抖：同一条便签一次会话里只记一次「编辑」，搜索一次会话只记一次。
         var editedInSession = useRef({})
@@ -1390,6 +1542,8 @@
               sessionId: activeSessionId,
               createdAt: now,
               updatedAt: now,
+              // 新便签永远落在最上面，不管之前怎么手动排过。
+              order: nextOrder(prev.notes),
             }
             return { notes: [note].concat(prev.notes).slice(0, MAX_NOTES), open: true }
           })
@@ -1429,7 +1583,7 @@
               // 注意：这里不刷 updatedAt。列表按 updatedAt 排序，如果每敲一个字就刷，
               // 正在编辑的卡片会立刻跳到列表最顶部，滚动位置跟着跳——打字体验直接崩。
               // 「最近改动」留到失焦时由 commitNote 更新。
-              return { id: note.id, text: text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: note.updatedAt }
+              return { id: note.id, text: text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return changed ? { notes: next, open: prev.open } : prev
           })
@@ -1450,7 +1604,7 @@
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
-              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: now }
+              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: now }
             })
             return { notes: next, open: prev.open }
           })
@@ -1462,7 +1616,7 @@
               if (note.id !== id) return note
               var index = COLOR_IDS.indexOf(note.color)
               var color = COLOR_IDS[(index + 1) % COLOR_IDS.length]
-              return { id: note.id, text: note.text, color: color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: note.updatedAt }
+              return { id: note.id, text: note.text, color: color, pinned: note.pinned, archived: note.archived, archivedAt: note.archivedAt, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return { notes: next, open: prev.open }
           })
@@ -1473,7 +1627,7 @@
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
-              return { id: note.id, text: note.text, color: note.color, pinned: !note.pinned, archived: note.archived, archivedAt: note.archivedAt, createdAt: note.createdAt, updatedAt: note.updatedAt }
+              return { id: note.id, text: note.text, color: note.color, pinned: !note.pinned, archived: note.archived, archivedAt: note.archivedAt, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return { notes: next, open: prev.open }
           })
@@ -1486,7 +1640,7 @@
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
-              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: true, archivedAt: now, createdAt: note.createdAt, updatedAt: note.updatedAt }
+              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: true, archivedAt: now, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return { notes: next, open: prev.open }
           })
@@ -1498,11 +1652,42 @@
           setStore(function (prev) {
             var next = prev.notes.map(function (note) {
               if (note.id !== id) return note
-              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: false, archivedAt: 0, createdAt: note.createdAt, updatedAt: note.updatedAt }
+              return { id: note.id, text: note.text, color: note.color, pinned: note.pinned, archived: false, archivedAt: 0, sessionId: note.sessionId, order: note.order, createdAt: note.createdAt, updatedAt: note.updatedAt }
             })
             return { notes: next, open: prev.open }
           })
           recordMetric('unarchive')
+        }, [])
+
+        // 拖动排序：拖起时只记一个 ref，松手才提交一次顺序（拖动过程零 re-render）。
+        var startDrag = useCallback(function (id) {
+          dragSourceRef.current = id
+        }, [])
+
+        var dropOn = useCallback(function (id, after) {
+          var from = dragSourceRef.current
+          dragSourceRef.current = null
+          if (!from || from === id) return
+          setStore(function (prev) {
+            var next = reorderNotes(prev.notes, from, id, after === true)
+            return next ? { notes: next, open: prev.open } : prev
+          })
+        }, [])
+
+        // 键盘等价：把手聚焦后 ↑/↓ 移动一格。
+        var moveBy = useCallback(function (id, delta) {
+          setStore(function (prev) {
+            var ordered = sortNotes(prev.notes)
+            var index = -1
+            for (var i = 0; i < ordered.length; i += 1) {
+              if (ordered[i].id === id) index = i
+            }
+            if (index === -1) return prev
+            var target = ordered[index + delta]
+            if (!target) return prev
+            var next = reorderNotes(prev.notes, id, target.id, delta > 0)
+            return next ? { notes: next, open: prev.open } : prev
+          })
         }, [])
 
         // 底部提示条只有一个通道，三种文案：删除了 / 导入了 / 出错了。
@@ -1625,6 +1810,13 @@
 
           downloadText(stampFilename('.md'), lines.join('\n'), 'text/markdown;charset=utf-8')
         }, [store.notes])
+
+        // 放弃手动顺序，整份按「最近改动」重排。
+        var resortOrder = function () {
+          setStore(function (prev) {
+            return { notes: resortByTime(prev.notes), open: prev.open }
+          })
+        }
 
         // 备份（JSON）与恢复：备份是可还原的格式，Markdown 只负责给人看。
         var exportBackup = function () {
@@ -1763,6 +1955,21 @@
                     },
                     IconUpload(14),
                     h('span', null, t('menu.restore')),
+                  ),
+                  // 手动拖乱了怎么办：一键回到「最近改动」顺序。
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsn-menu-item',
+                      onClick: function () {
+                        setMenuOpen(false)
+                        resortOrder()
+                      },
+                    },
+                    IconGrip(14),
+                    h('span', null, t('menu.resort')),
                   ),
                 )
               : null,
@@ -1931,6 +2138,9 @@
                     onCommit: commitNote,
                     onRemove: removeNote,
                     onCopy: copyNote,
+                    onDragStart: startDrag,
+                    onDrop: dropOn,
+                    onMoveBy: moveBy,
                     onCycleColor: cycleColor,
                     onTogglePin: togglePin,
                     onArchive: archiveNote,
@@ -2060,7 +2270,15 @@
         '.dsn-list.has-toast{padding-bottom:64px}',
         '.dsn-list::-webkit-scrollbar{width:8px}',
         '.dsn-list::-webkit-scrollbar-thumb{background:rgba(127,127,127,.32);border-radius:4px}',
-        '.dsn-note{--dsn-sticky:#f0b13a;position:relative;border:1px solid var(--dsn-line);border-left:3px solid var(--dsn-sticky);border-radius:11px;background:rgba(127,127,127,.08);padding:7px 8px 4px 10px}',
+        '.dsn-note{--dsn-sticky:#f0b13a;position:relative;border:1px solid var(--dsn-line);border-left:3px solid var(--dsn-sticky);border-radius:11px;background:rgba(127,127,127,.08);padding:7px 8px 4px 16px}',
+        // 拖动把手：占住左边缘（色条 + 内边距）那块空隙，平时隐形，hover/聚焦才显形。
+        '.dsn-grip{position:absolute;left:1px;top:5px;width:22px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsn-fg-2);opacity:0;cursor:grab;display:grid;place-items:center;transition:opacity .12s ease,background .12s ease}',
+        '.dsn-note:hover .dsn-grip,.dsn-note:focus-within .dsn-grip{opacity:.7}',
+        '.dsn-grip:hover{opacity:1;background:rgba(127,127,127,.16)}',
+        '.dsn-grip:focus-visible{opacity:1;outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-grip:active{cursor:grabbing}',
+        '.dsn-note.is-dragging{opacity:.45}',
+        '.dsn-note.is-drop-target{box-shadow:inset 0 0 0 1px var(--dsn-accent)}',
         '.dsn-c-amber{--dsn-sticky:#f0b13a}',
         '.dsn-c-sky{--dsn-sticky:#4f9dff}',
         '.dsn-c-mint{--dsn-sticky:#3fbd8b}',
