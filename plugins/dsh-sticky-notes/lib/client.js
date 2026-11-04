@@ -12,6 +12,10 @@
 ;(function () {
   'use strict'
 
+  // 包名要出现在三处身份里：loader id、模块 name、以及失败兜底模块的 name。
+  // 只写一处会「改名后忘了改」——0.1.10 改包名就是这么把浏览器半侧弄坏的。
+  var PKG_NAME = '@woshiwenjunjie/dsh-sticky-notes'
+
   var LOADER = window.__ModuleLoader__
   if (!LOADER || typeof LOADER.load !== 'function') {
     console.error('[dsh-sticky-notes] 页面没有注入 __ModuleLoader__，便签栏无法加载')
@@ -19,7 +23,9 @@
   }
 
   LOADER.load({
-    id: 'dsh-sticky-notes',
+    // 必须等于 package.json 的 name：Web 端按「包名」到模块表里取浏览器半侧，
+    // 写成短名（改名前的 dsh-sticky-notes）会取不到，整个便签栏静默不加载。
+    id: PKG_NAME,
     factory: function (require) {
       var module = { exports: {} }
 
@@ -33,7 +39,7 @@
       if (!React || typeof React.createElement !== 'function') {
         // 没有 React 就当作空插件：绝不能让浏览器半侧抛错拖垮整个页面。
         module.exports = {
-          name: 'dsh-sticky-notes',
+          name: PKG_NAME,
           inject: [],
           apply: function () {
             console.warn('[dsh-sticky-notes] 已跳过：react 模块缺失')
@@ -2323,7 +2329,7 @@
 
       // ---------------------------------------------------------------- 插件
 
-      var name = 'dsh-sticky-notes'
+      var name = PKG_NAME
       // 只把 slots 作为硬依赖：locale 是可选增强，用 ctx.get 惰性探测，
       // 免得「语言服务没就绪」把整个插件卡在 waiting（那就一个 slot 都注册不了）。
       var inject = ['slots']

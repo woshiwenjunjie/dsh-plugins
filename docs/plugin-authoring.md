@@ -251,6 +251,32 @@ is higher than the new version 0.1.9
 这不是版本号问题，是**名字被别人占了**。解法是发到自己的 scope 下（`@you/dsh-xxx`），
 再按上面的规则同步改 `name:`。
 
+### 改包名时，`lib/client.js` 里的 loader id 必须一起改
+
+浏览器半侧是这样注册的：
+
+```js
+window.__ModuleLoader__.load({ id: '<package.json 的 name>', factory })
+```
+
+Web 端按**包名**去模块表里取浏览器半侧。id 写错（最常见：改名后还留着旧短名）的后果是
+**静默不加载**——面板整个不出现，控制台也没有任何报错，因为「没人来取」不算错误。
+
+三处身份要一致，建议在文件顶部写一个常量：
+
+```js
+var PKG_NAME = '@you/dsh-my-plugin'   // = package.json 的 name
+LOADER.load({ id: PKG_NAME, factory })
+module.exports = { name: PKG_NAME, inject: ['slots'], apply }        // 正常分支
+return { name: PKG_NAME, inject: [], apply: function () {} }         // React 缺失兜底
+```
+
+而 `cordis.patch.yml` 的 `id:` 是**另一回事**（profile 内唯一键，可以继续用短名），
+不要把它和模块 id 混在一起。
+
+冒烟测试里的身份断言**从 `package.json` 读**，不要写死字符串——本仓库就是写死了旧短名，
+导致「改名后静默不加载」这个回归没被测出来。
+
 ### 打包产物和源码树是两回事
 
 `files` 白名单对不对、`test/` 有没有混进去、icon 有没有超 256KiB、包内产物是不是最新的，
@@ -275,5 +301,6 @@ is higher than the new version 0.1.9
 | 存储写失败但界面显示「已保存」 | 写入函数吞了异常，调用方无条件当成成功 | 写入返回成败，失败要如实提示 |
 | 小字用语义色当文字色，对比度贴线 | 语义色是按「背景/图标」设计的，不一定满足 4.5:1 | 文字用 label 色、语义色只做边框/圆点，用对比度测试卡住 |
 | 想读「当前会话」读不到 | slot 组件只取了 `locale`，把标准 kit props 丢了 | 注册函数把收到的 props 原样转发（`useSessions` 在里面） |
+| 改了包名后便签栏整块消失、控制台无报错 | `lib/client.js` 的 `__ModuleLoader__.load({ id })` 还是旧包名，Web 端按包名取不到模块 | loader id / 模块 name / 兜底 name 统一用 `PKG_NAME` 常量；冒烟断言从 `package.json` 读包名 |
 | 拖动排序把其他交互弄丢 | 逐字段重建 note 对象时漏了新字段（`order` / `sessionId`） | 重建地方全部带上；`normalizeNote` 给老数据兜底 |
 

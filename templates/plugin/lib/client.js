@@ -5,6 +5,11 @@
 ;(function () {
   'use strict'
 
+  // 三处身份必须是同一个字符串，而且**等于 package.json 的 name**（含 scope）：
+  // 下面的 loader id、模块导出的 name、失败兜底模块的 name。
+  // 改名时漏改这里，浏览器半侧会静默不加载——面板整个不出现，控制台也没有报错。
+  var PKG_NAME = 'dsh-my-plugin'
+
   var LOADER = window.__ModuleLoader__
   if (!LOADER || typeof LOADER.load !== 'function') {
     console.error('[dsh-my-plugin] 页面没有注入 __ModuleLoader__')
@@ -12,7 +17,7 @@
   }
 
   LOADER.load({
-    id: 'dsh-my-plugin',
+    id: PKG_NAME,
     factory: function (require) {
       var React
       try {

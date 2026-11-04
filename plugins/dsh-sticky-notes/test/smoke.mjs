@@ -4,6 +4,10 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 
 const source = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+// 身份类断言一律从 package.json 取，不写死字符串：
+// 0.1.10 把包名改成带 scope 的形式时，client.js 的 loader id 忘了跟着改，
+// 而这里断言的是旧的短名，于是「改名后浏览器半侧静默不加载」这个回归没被测出来。
+const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 const elements = []
 const buttons = []
@@ -167,10 +171,10 @@ vm.runInContext(source, sandbox, { filename: 'client.js' })
 const problems = []
 if (!loaderConfig) problems.push('脚本没有调用 __ModuleLoader__.load')
 else {
-  if (loaderConfig.id !== 'dsh-sticky-notes') problems.push('loader id 不是 dsh-sticky-notes：' + loaderConfig.id)
+  if (loaderConfig.id !== pkg.name) problems.push(`loader id 必须等于包名（${pkg.name}），实际：${loaderConfig.id}`)
   const mod = loaderConfig.factory(fakeRequire)
   if (!mod || typeof mod.apply !== 'function') problems.push('factory 没有返回带 apply 的模块')
-  if (mod.name !== 'dsh-sticky-notes') problems.push('模块 name 不对：' + mod.name)
+  if (mod.name !== pkg.name) problems.push(`模块 name 必须等于包名（${pkg.name}），实际：${mod.name}`)
   if (!Array.isArray(mod.inject) || mod.inject.indexOf('slots') === -1) problems.push('inject 里没有 slots')
   mod.apply(fakeCtx)
   if (!registered) problems.push('没有注册任何 slot 组件')

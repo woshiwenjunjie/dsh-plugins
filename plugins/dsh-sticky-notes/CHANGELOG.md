@@ -2,6 +2,31 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.12] - 2026-11-04
+
+**修一个会让人完全看不到便签栏的回归**：0.1.10 改包名时漏改了浏览器半侧的 loader id。
+
+### 修复
+
+- `lib/client.js` 里 `__ModuleLoader__.load({ id })` 还写着改名前的短名 `dsh-sticky-notes`。
+  Web 端是按**包名**（`@woshiwenjunjie/dsh-sticky-notes`）到模块表里取浏览器半侧的，
+  取不到就静默跳过——面板整个不出现，控制台也没有报错，最难查的那种。
+- 现在三处身份（loader id / 模块导出的 `name` / 失败兜底模块的 `name`）统一走一个
+  `PKG_NAME` 常量，等于 `package.json` 的 `name`。`cordis.patch.yml` 的 `id: dsh-sticky-notes`
+  保持不变——entry id 只是 profile 内的唯一键，跟模块 id 是两回事。
+
+### 测试（这次的根因是测试本身写死了旧值）
+
+- `test/smoke.mjs` 的身份断言改为**从 `package.json` 读包名**，并同时断言模块 `name`；
+  把短名放回去，两条断言立即失败（已反验）。
+- `templates/plugin/lib/client.js` 同步这个写法，避免下一个插件再踩。
+- `docs/plugin-authoring.md` 的常见坑表加一行：改名后浏览器半侧静默不加载。
+
+### 注意
+
+改完必须**重装**才生效（安全模式列表里的升级/重装，或走插件市场）。
+不要去改 `node_modules` 下那份：它指向 `.generations/live/...`，每次启动重建。
+
 ## [0.1.11] - 2026-11-04
 
 主题：**顺序由你决定**。便签从「按时间自动排」变成「可以手动排」，最后一块「理所当然」的能力。
