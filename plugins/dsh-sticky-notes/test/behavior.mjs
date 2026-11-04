@@ -312,6 +312,29 @@ function cards() {
 function cardTexts() {
   return cards().map((el) => el.props.value)
 }
+// 搜索态下正文是只读高亮视图，不是 textarea：两种形态都算「这条便签显示的文字」。
+function noteViews() {
+  return elements.filter((el) => el.type === 'div' && el.props.className === 'dsn-note-view')
+}
+function marks() {
+  return elements.filter((el) => el.type === 'mark')
+}
+function flattenText(node) {
+  if (node === null || node === undefined) return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(flattenText).join('')
+  if (node.props) return flattenText(node.props.children)
+  return ''
+}
+function shownTexts() {
+  return elements
+    .filter(
+      (el) =>
+        (el.type === 'textarea' && el.props.className === 'dsn-note-input') ||
+        (el.type === 'div' && el.props.className === 'dsn-note-view'),
+    )
+    .map((el) => (el.type === 'textarea' ? el.props.value : flattenText(el.props.children)))
+}
 function hint() {
   return elements.find((el) => typeof el.props.className === 'string' && el.props.className.indexOf('dsn-hint') === 0)
 }
@@ -452,12 +475,26 @@ check('便签够多时渲染出搜索框', Boolean(searchInput()), true)
 check('「全部」视图默认不列已归档', cardTexts().indexOf(ARCHIVED_TEXT), -1)
 
 act(() => searchInput().props.onChange({ target: { value: '归档' } }))
-check('搜索能跨视图命中已归档便签', cardTexts(), [ARCHIVED_TEXT])
+check('搜索能跨视图命中已归档便签', shownTexts(), [ARCHIVED_TEXT])
 check('命中的归档便签带「已归档」标记', elements.some((el) => el.props.className === 'dsn-archived-mark'), true)
-check('归档命中项仍是只读', cards()[0].props.readOnly, true)
+check('搜索态下正文渲染成只读视图', cards().length, 0)
+check('命中片段用 <mark> 高亮', marks().map((el) => el.props.children), ['归档'])
+check('归档便签的只读视图不可点击编辑', noteViews()[0].props.role, undefined)
 
 act(() => searchInput().props.onChange({ target: { value: '' } }))
 check('清空搜索回到当前视图', cardTexts().length, 6)
+check('清空搜索后没有残留高亮', marks().length, 0)
+
+// 搜索态下点一条 → 只把这一条切回可编辑，其余保持只读高亮
+act(() => searchInput().props.onChange({ target: { value: '周' } }))
+check('两条便签命中「周」', shownTexts().length, 2)
+check('命中片段两处高亮', marks().length, 2)
+act(() => noteViews()[0].props.onClick({}))
+check('点中的那条切回 textarea', cards().length, 1)
+check('其余仍是只读视图', noteViews().length, 1)
+check('切回编辑的那条自动聚焦', cards()[0].props.autoFocus, true)
+act(() => searchInput().props.onChange({ target: { value: '' } }))
+check('清空搜索后全部回到 textarea', cards().length, 6)
 
 // 搜索跨视图，所以标签要同步高亮「全部」，不能出现「已归档标签亮着、结果里却有未归档便签」
 function filterTabs() {
@@ -468,7 +505,7 @@ check('切到已归档视图', filterTabs()[1].props['aria-selected'], 'true')
 act(() => searchInput().props.onChange({ target: { value: '归档' } }))
 check('搜索时「全部」标签高亮', filterTabs()[0].props['aria-selected'], 'true')
 check('搜索时「已归档」标签不再高亮', filterTabs()[1].props['aria-selected'], 'false')
-check('搜索仍命中归档便签', cardTexts(), [ARCHIVED_TEXT])
+check('搜索仍命中归档便签', shownTexts(), [ARCHIVED_TEXT])
 
 // 收起后焦点要还给左边缘标签，键盘用户不会掉到页面开头。
 focusedElement = null
@@ -635,5 +672,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定',
+  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定',
 )

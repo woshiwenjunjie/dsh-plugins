@@ -326,6 +326,7 @@
         'empty.archived.sub': '归档后随时能在这里找回来。',
         'note.placeholder': '空的便签…',
         'note.aria': '便签内容',
+        'note.edit': '点一下编辑',
         'note.pinned': '置顶',
         'note.pin': '置顶这条便签',
         'note.unpin': '取消置顶',
@@ -390,6 +391,7 @@
         'empty.archived.sub': 'Archived notes stay here until you restore or delete them.',
         'note.placeholder': 'Empty note…',
         'note.aria': 'Note content',
+        'note.edit': 'Click to edit',
         'note.pinned': 'Pinned',
         'note.pin': 'Pin this note',
         'note.unpin': 'Unpin this note',
@@ -746,6 +748,28 @@
         return fallback[0]
       }
 
+      // ------------------------------------------------------------ 搜索高亮
+      //
+      // textarea 里画不了 <mark>，所以搜索时正文切成「只读 + 高亮」渲染：
+      // 命中段单独包 <mark>，其余按普通文本节点渲染。
+      function escapeRegExp(text) {
+        return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      }
+
+      function highlightSegments(text, query) {
+        var source = String(text == null ? '' : text)
+        var keyword = String(query || '').trim()
+        if (!keyword) return [source]
+        var parts = source.split(new RegExp('(' + escapeRegExp(keyword) + ')', 'gi'))
+        var out = []
+        for (var i = 0; i < parts.length; i += 1) {
+          if (!parts[i]) continue
+          if (i % 2 === 1) out.push(h('mark', { key: 'm' + i, className: 'dsn-mark' }, parts[i]))
+          else out.push(parts[i])
+        }
+        return out
+      }
+
       // ---------------------------------------------------------------- 卡片
 
       function NoteCard(props) {
@@ -762,6 +786,12 @@
         var onUnarchive = props.onUnarchive
 
         var archived = note.archived === true
+        var query = props.query || ''
+        var editing = props.editing === true
+        var onStartEdit = props.onStartEdit
+        // 搜索时把正文切成「只读 + 高亮」：textarea 里画不了 <mark>。
+        // 点一下这一条就切回可编辑（只有它，其它仍是只读），不打断「正在找什么」。
+        var readingOnly = query.trim().length > 0 && !editing
 
         return h(
           'article',
@@ -769,21 +799,48 @@
             className:
               'dsn-note dsn-c-' + note.color + (note.pinned && !archived ? ' is-pinned' : '') + (archived ? ' is-archived' : ''),
           },
-          h(AutoTextarea, {
-            className: 'dsn-note-input',
-            value: note.text,
-            rows: 2,
-            spellCheck: false,
-            placeholder: t('note.placeholder'),
-            'aria-label': t('note.aria'),
-            readOnly: archived,
-            onChange: function (event) {
-              onChange(note.id, event.target.value)
-            },
-            onBlur: function () {
-              if (typeof onCommit === 'function') onCommit(note.id)
-            },
-          }),
+          readingOnly
+            ? h(
+                'div',
+                {
+                  className: 'dsn-note-view',
+                  role: archived ? undefined : 'button',
+                  tabIndex: archived ? undefined : 0,
+                  title: archived ? undefined : t('note.edit'),
+                  'aria-label': t('note.aria'),
+                  onClick: archived
+                    ? undefined
+                    : function () {
+                        if (typeof onStartEdit === 'function') onStartEdit(note.id)
+                      },
+                  onKeyDown: archived
+                    ? undefined
+                    : function (event) {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          if (typeof onStartEdit === 'function') onStartEdit(note.id)
+                        }
+                      },
+                },
+                highlightSegments(note.text, query),
+              )
+            : h(AutoTextarea, {
+                className: 'dsn-note-input',
+                value: note.text,
+                rows: 2,
+                spellCheck: false,
+                // 从「只读高亮」点进来的这一条，挂载即聚焦，落点就是刚才点的地方。
+                autoFocus: editing,
+                placeholder: t('note.placeholder'),
+                'aria-label': t('note.aria'),
+                readOnly: archived,
+                onChange: function (event) {
+                  onChange(note.id, event.target.value)
+                },
+                onBlur: function () {
+                  if (typeof onCommit === 'function') onCommit(note.id)
+                },
+              }),
           h(
             'div',
             { className: 'dsn-note-foot' },
@@ -867,6 +924,8 @@
         // 上一次落盘是否失败（存储满、被禁用）：失败时不能继续显示「已保存」。
         var [saveFailed, setSaveFailed] = useState(false)
         var [query, setQuery] = useState('')
+        // 搜索态下点中某一条：只把这一条切回可编辑，其余仍是只读高亮。
+        var [editingId, setEditingId] = useState(null)
         // 'all' 或 'archived'：归档视图切换。
         var [view, setView] = useState('all')
         // 删除后 5 秒内可撤销：{ note } 或 null。
@@ -1276,6 +1335,18 @@
           setTick(now)
           recordMetric('create')
         }, [activeSessionId])
+
+        // 搜索词一变，「哪条在编辑」就复位：换了一次搜索还停在编辑态会很怪。
+        useEffect(
+          function () {
+            setEditingId(null)
+          },
+          [query],
+        )
+
+        var startEdit = useCallback(function (id) {
+          setEditingId(id)
+        }, [])
 
         // 下面这些回调都会作为 memo(NoteCard) 的 props：引用必须稳定，否则 memo 全部失效。
         // 所以统一 useCallback([])，并且**不闭包 store** —— 需要「当前列表」时读 latestStore。
@@ -1764,6 +1835,9 @@
                     tick: tick,
                     t: t,
                     timeLabels: timeLabels,
+                    query: query,
+                    editing: editingId === note.id,
+                    onStartEdit: startEdit,
                     onChange: updateNote,
                     onCommit: commitNote,
                     onRemove: removeNote,
@@ -1899,6 +1973,10 @@
         '.dsn-note-input{width:100%;border:0;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1.55;resize:none;padding:2px 2px 0;overflow:hidden;display:block}',
         '.dsn-note-input:focus{outline:none}',
         '.dsn-note-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
+        '.dsn-note-view{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;padding:1px 2px 2px;border-radius:6px;cursor:text}',
+        '.dsn-note-view:hover{background:rgba(127,127,127,.07)}',
+        '.dsn-note-view:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-mark{background:rgba(127,127,127,.3);color:inherit;font-weight:650;border-radius:3px;padding:0 1px}',
         '.dsn-note-foot{display:flex;align-items:center;gap:3px;padding:1px 0 2px 2px;min-height:28px}',
         '.dsn-time{font-size:11px;color:var(--dsn-fg-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
         '.dsn-pin-mark{font-size:9.5px;line-height:1.6;color:var(--dsn-fg-2);background:rgba(127,127,127,.16);border-radius:6px;padding:0 5px;white-space:nowrap}',
