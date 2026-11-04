@@ -39,10 +39,13 @@ let cursor = 0
 let elements = []
 let dirty = false
 let pendingEffects = []
-// 定时器排队到「渲染提交之后」再跑，贴近浏览器宏任务时序（收起后要等标签挂载完才能还焦点）。
+// 虚拟时钟 + 宏任务队列：定时器只在 advance(ms) 之后才到期，
+// 这样「5 秒撤销窗口」和「300ms 去抖落盘」都能被测到，而不是一调度就被执行掉。
+let clock = 0
 let timers = new Map()
 let timerSeq = 0
 let focusedElement = null
+let lastBlob = null
 
 function createElement(type, rawProps, ...children) {
   const props = Object.assign({}, rawProps || {})
@@ -125,9 +128,9 @@ const sandbox = {
     innerWidth: 1400,
     setInterval: () => 0,
     clearInterval: () => {},
-    setTimeout: (fn) => {
+    setTimeout: (fn, delay) => {
       timerSeq += 1
-      timers.set(timerSeq, fn)
+      timers.set(timerSeq, { fn, at: clock + (typeof delay === 'number' ? delay : 0) })
       return timerSeq
     },
     clearTimeout: (id) => {
@@ -139,13 +142,22 @@ const sandbox = {
   document: {
     head: { appendChild() {} },
     body: { appendChild() {} },
-    createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, remove() {} }),
+    createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, remove() {}, click() {} }),
     addEventListener: () => {},
     removeEventListener: () => {},
     querySelector: (selector) =>
       selector === '[data-dsh-sidebar-root]' ? { getBoundingClientRect: () => ({ right: 248 }) } : null,
   },
-  Blob: class Blob {},
+  Blob: class Blob {
+    constructor(parts, options) {
+      this.parts = parts
+      this.type = options && options.type
+      lastBlob = this
+    }
+    text() {
+      return Promise.resolve(this.parts.join(''))
+    }
+  },
   URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
 }
 
@@ -192,20 +204,34 @@ function renderPass() {
   }
 }
 
+function dueTimers() {
+  const due = []
+  for (const [id, timer] of timers) if (timer.at <= clock) due.push([id, timer])
+  due.sort((a, b) => a[1].at - b[1].at)
+  return due
+}
+
 function flush() {
   let guard = 0
   dirty = true
-  while (dirty || timers.size > 0) {
-    if (guard++ > 40) throw new Error('渲染次数过多，可能存在无限循环')
+  while (dirty || dueTimers().length > 0) {
+    if (guard++ > 60) throw new Error('渲染次数过多，可能存在无限循环')
     dirty = false
     renderPass()
-    // 渲染稳定后跑排队的定时器（宏任务），再继续收敛。
-    if (!dirty && timers.size > 0) {
-      const queue = [...timers.values()]
-      timers.clear()
-      for (const fn of queue) fn()
+    // 渲染稳定后跑「已到期」的定时器，再继续收敛。
+    if (!dirty) {
+      for (const [id, timer] of dueTimers()) {
+        timers.delete(id)
+        timer.fn()
+      }
     }
   }
+}
+
+/** 推进虚拟时间（毫秒）并收敛：去抖落盘 300ms、撤销窗口 5000ms 靠它触发。 */
+function advance(ms) {
+  clock += ms
+  flush()
 }
 
 function act(mutate) {
@@ -283,6 +309,7 @@ check('新便签排在最前', cardTexts()[0], '新想法')
 check('记下后草稿清空', draftArea().props.value, '')
 
 // 4. 存储写失败：必须显示「保存失败」，不能谎报「已保存」
+advance(300)
 check('正常情况下提示已保存', hint() && hint().props.children, '已自动保存到本机')
 // 这一步会故意触发 QuotaExceededError，把组件自己的 console.warn 静音，免得刷日志
 function quiet(fn) {
@@ -296,11 +323,13 @@ function quiet(fn) {
 }
 storageFull = true
 quiet(() => act(() => cards()[0].props.onChange({ target: { value: '新想法（存不下）' } })))
+quiet(() => advance(300))
 check('存储失败时提示保存失败', hint() && hint().props.children, '保存失败，请先导出')
 check('失败提示带 is-error 样式', hint() && hint().props.className, 'dsn-hint is-error')
 check('失败提示用 role=alert', hint() && hint().props.role, 'alert')
 storageFull = false
 act(() => cards()[0].props.onChange({ target: { value: '新想法（又能存了）' } }))
+advance(300)
 check('恢复可写后回到已保存', hint() && hint().props.children, '已自动保存到本机')
 
 // ---------------------------------------------------------------- 搜索与焦点
@@ -378,6 +407,98 @@ act(() => closeButton().props.onClick({}))
 check('收起后不再渲染面板', elements.some((el) => el.props.className === 'dsn-panel'), false)
 check('收起后焦点回到左边缘标签', focusedElement && focusedElement.props.className, 'dsn-tab')
 
+// ---------------------------------------------------------------- 备份与恢复
+
+function menuButton() {
+  return elements.find((el) => el.type === 'button' && String(el.props.className || '').indexOf('dsn-more') !== -1)
+}
+function menuItems() {
+  return elements.filter((el) => el.type === 'button' && el.props.className === 'dsn-menu-item')
+}
+function fileInput() {
+  return elements.find((el) => el.type === 'input' && el.props.className === 'dsn-file')
+}
+function toastEl() {
+  return elements.find((el) => el.type === 'div' && String(el.props.className || '').indexOf('dsn-toast') === 0)
+}
+function toastUndo() {
+  return elements.find((el) => el.type === 'button' && el.props.className === 'dsn-toast-undo')
+}
+function fakeFile(text) {
+  return { name: 'backup.json', type: 'application/json', text: () => Promise.resolve(text) }
+}
+async function actAsync(work) {
+  await work()
+  // 让 file.text() / Promise 链跑完，再收敛渲染。
+  await new Promise((resolve) => setImmediate(resolve))
+  flush()
+}
+
+const roundTripSeed = [
+  { id: 'r1', text: '第一条', color: 'sky', pinned: true, createdAt: now - 4000, updatedAt: now - 4000 },
+  { id: 'r2', text: '第二条', color: 'rose', pinned: false, archived: true, archivedAt: now - 3000, createdAt: now - 3000, updatedAt: now - 3000 },
+]
+remount(roundTripSeed)
+
+act(() => menuButton().props.onClick({}))
+check('「更多」菜单有两个备份项', menuItems().length, 2)
+
+// 导出 → 清空 → 导入，字段要一模一样
+await actAsync(() => menuItems()[0].props.onClick({}))
+const exported = await lastBlob.text()
+const exportedNotes = JSON.parse(exported).notes
+check('导出的备份带格式标记', JSON.parse(exported).format, 'dsh-sticky-notes-backup')
+check('导出包含全部便签（含归档）', exportedNotes.length, 2)
+
+remount([])
+check('清空后没有便签', cardTexts().length, 0)
+await actAsync(() => fileInput().props.onChange({ target: { files: [fakeFile(exported)] } }))
+advance(300)
+check('导入后「全部」列表只显示未归档的 1 条', cardTexts().length, 1)
+const storedAfterImport = JSON.parse(storage.get('dsh-sticky-notes:v1')).notes
+check('导入后存储里是 2 条（含归档）', storedAfterImport.length, 2)
+const shape = (list) =>
+  list
+    .map((note) => [note.id, note.text, note.color, !!note.pinned, !!note.archived, note.updatedAt])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+check('导入结果与备份文件逐字段一致', shape(storedAfterImport), shape(exportedNotes))
+
+// 合并：同 id 取较新的，不同 id 追加
+const mergeSeed = [
+  { id: 'm1', text: '甲', color: 'amber', pinned: false, createdAt: now - 5000, updatedAt: now - 5000 },
+  { id: 'm2', text: '乙', color: 'mint', pinned: false, createdAt: now - 4000, updatedAt: now - 4000 },
+]
+remount(mergeSeed)
+const mergeBackup = JSON.stringify({
+  format: 'dsh-sticky-notes-backup',
+  version: 1,
+  notes: [
+    { id: 'm1', text: '甲（备份里更新）', color: 'amber', pinned: false, createdAt: now - 5000, updatedAt: now - 1000 },
+    { id: 'm3', text: '丙（备份里新增）', color: 'violet', pinned: false, createdAt: now - 900, updatedAt: now - 900 },
+  ],
+})
+await actAsync(() => fileInput().props.onChange({ target: { files: [fakeFile(mergeBackup)] } }))
+check('合并后共 3 条', cardTexts().length, 3)
+check('同 id 取较新的内容', cardTexts().indexOf('甲（备份里更新）'), 1)
+check('旧内容被新内容替换', cardTexts().indexOf('甲'), -1)
+check('不同 id 追加进来（按改动时间排最前）', cardTexts()[0], '丙（备份里新增）')
+check('提示条报导入条数', toastEl() && toastEl().props.children[0].props.children, '已导入 1 条 · 更新 1 条')
+
+// 导入可撤销：整份换回导入前
+act(() => toastUndo().props.onClick({}))
+check('撤销导入回到导入前', cardTexts().length, 2)
+check('撤销后内容回到原样', cardTexts().slice().sort(), ['乙', '甲'].sort())
+
+// 非法文件 / 空备份：明确报错，且不动数据
+await actAsync(() => fileInput().props.onChange({ target: { files: [fakeFile('这不是 JSON')] } }))
+check('非法备份给错误提示', toastEl() && toastEl().props.children[0].props.children, '不是本插件的备份文件')
+check('错误提示带 is-error', toastEl() && toastEl().props.className, 'dsn-toast is-error')
+check('非法备份不动现有数据', cardTexts().length, 2)
+
+await actAsync(() => fileInput().props.onChange({ target: { files: [fakeFile(JSON.stringify({ notes: [] }))] } }))
+check('空备份给错误提示', toastEl() && toastEl().props.children[0].props.children, '备份文件里没有便签')
+check('空备份不动现有数据', cardTexts().length, 2)
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -385,4 +506,6 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(' - ' + failure)
   process.exit(1)
 }
-console.log('PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 / 收起还焦点')
+console.log(
+  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 / 收起还焦点 / 备份导出导入 round-trip / 合并与撤销',
+)

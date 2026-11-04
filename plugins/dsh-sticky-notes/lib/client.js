@@ -138,12 +138,108 @@
         })
       }
 
+      // ------------------------------------------------------------ 备份与恢复
+      //
+      // 备份必须是「可还原」的格式，所以用 JSON 保留全部字段；Markdown 导出只负责给人看。
+      var BACKUP_FORMAT = 'dsh-sticky-notes-backup'
+
+      function backupPayload(notes) {
+        return JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: Date.now(), notes: notes }, null, 2)
+      }
+
+      /** 认不出备份就返回 null（调用方据此提示，绝不半途改数据）。 */
+      function parseBackup(text) {
+        var parsed
+        try {
+          parsed = JSON.parse(String(text == null ? '' : text))
+        } catch (error) {
+          return null
+        }
+        if (!parsed || typeof parsed !== 'object') return null
+        var list = Array.isArray(parsed) ? parsed : Array.isArray(parsed.notes) ? parsed.notes : null
+        if (!list) return null
+        var notes = []
+        for (var i = 0; i < list.length; i += 1) {
+          var note = normalizeNote(list[i])
+          if (note) notes.push(note)
+        }
+        return notes
+      }
+
+      /** 按 id 合并：同 id 取 updatedAt 较新的；不静默覆盖，返回新增/更新条数。 */
+      function mergeNotes(current, incoming) {
+        var byId = {}
+        var order = []
+        var i
+        for (i = 0; i < current.length; i += 1) {
+          byId[current[i].id] = current[i]
+          order.push(current[i].id)
+        }
+        var added = 0
+        var updated = 0
+        for (i = 0; i < incoming.length; i += 1) {
+          var note = incoming[i]
+          var existing = byId[note.id]
+          if (!existing) {
+            byId[note.id] = note
+            order.push(note.id)
+            added += 1
+            continue
+          }
+          if ((note.updatedAt || 0) > (existing.updatedAt || 0)) {
+            byId[note.id] = note
+            updated += 1
+          }
+        }
+        var merged = []
+        for (i = 0; i < order.length; i += 1) {
+          var item = byId[order[i]]
+          if (item) merged.push(item)
+        }
+        return { notes: sortNotes(merged), added: added, updated: updated }
+      }
+
+      /** 导出文件名：sticky-notes-20261104-1936.md / .json */
+      function stampFilename(extension) {
+        var stamp = new Date()
+        return (
+          'sticky-notes-' +
+          stamp.getFullYear() +
+          pad2(stamp.getMonth() + 1) +
+          pad2(stamp.getDate()) +
+          '-' +
+          pad2(stamp.getHours()) +
+          pad2(stamp.getMinutes()) +
+          extension
+        )
+      }
+
+      function downloadText(filename, text, mime) {
+        try {
+          var blob = new Blob([text], { type: mime })
+          var url = URL.createObjectURL(blob)
+          var link = document.createElement('a')
+          link.href = url
+          link.download = filename
+          document.body.appendChild(link)
+          link.click()
+          window.setTimeout(function () {
+            link.remove()
+            URL.revokeObjectURL(url)
+          }, 0)
+          return true
+        } catch (error) {
+          console.warn('[dsh-sticky-notes] 下载失败：', error)
+          return false
+        }
+      }
+
       // ------------------------------------------------------------ 本机埋点
       //
       // 只落在 localStorage，不上报。导出 Markdown 时附在末尾，方便用一周后
       // 拿真实数据决定下一步优化顺序（而不是靠直觉）。
       var METRICS_KEY = 'dsh-sticky-notes:metrics:v1'
-      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search']
+      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'import']
       var METRIC_LABELS = {
         open: '打开面板',
         create: '新建便签',
@@ -155,6 +251,7 @@
         unarchive: '恢复归档',
         export: '导出',
         search: '搜索',
+        import: '导入备份',
       }
 
       function readMetrics() {
@@ -199,6 +296,14 @@
         'sub.empty': '随手记',
         unit: '条',
         export: '导出为 Markdown',
+        'menu.more': '备份与恢复',
+        'menu.backup': '导出备份（JSON）',
+        'menu.restore': '从备份恢复…',
+        'toast.imported': '已导入',
+        'toast.updated': '更新',
+        'toast.backedUp': '备份已导出',
+        'toast.importFailed': '不是本插件的备份文件',
+        'toast.importEmpty': '备份文件里没有便签',
         close: '收起便签栏',
         'close.esc': '收起便签栏（Esc）',
         'composer.placeholder': '写下此刻的想法…（Ctrl+Enter 记下）',
@@ -242,6 +347,7 @@
         'metric.unarchive': '恢复归档',
         'metric.export': '导出',
         'metric.search': '搜索',
+        'metric.import': '导入备份',
       }
 
       var EN = {
@@ -251,6 +357,14 @@
         'sub.empty': 'Jot something',
         unit: 'notes',
         export: 'Export as Markdown',
+        'menu.more': 'Backup & restore',
+        'menu.backup': 'Export backup (JSON)',
+        'menu.restore': 'Restore from backup…',
+        'toast.imported': 'Imported',
+        'toast.updated': 'updated',
+        'toast.backedUp': 'Backup exported',
+        'toast.importFailed': "This isn't a notes backup file",
+        'toast.importEmpty': 'That backup has no notes',
         close: 'Collapse notes',
         'close.esc': 'Collapse notes (Esc)',
         'composer.placeholder': 'Jot something… (Ctrl+Enter to save)',
@@ -294,6 +408,7 @@
         'metric.unarchive': 'Restored',
         'metric.export': 'Exports',
         'metric.search': 'Searches',
+        'metric.import': 'Backups restored',
       }
 
       var dicts = { zh: ZH, en: EN }
@@ -475,6 +590,26 @@
             ],
             s,
           )
+        }, size)
+      }
+
+      function IconUpload(size) {
+        return pick('IconArrowUploadOutlineRegular', function (s) {
+          return svg(
+            [
+              h('path', { key: 'a', d: 'M12 20.5V10' }),
+              h('path', { key: 'b', d: 'M8 13.5l4-4 4 4' }),
+              h('path', { key: 'c', d: 'M4.5 4.5h15' }),
+            ],
+            s,
+          )
+        }, size)
+      }
+
+      // 「更多」三点：备份与恢复这类低频操作收进去，头部按钮数量不变。
+      function IconMore(size) {
+        return pick('IconMoreHorizontalOutlineRegular', function (s) {
+          return svg([h('path', { key: 'a', d: 'M6 12h.01M12 12h.01M18 12h.01' })], s)
         }, size)
       }
 
@@ -684,12 +819,17 @@
         var [view, setView] = useState('all')
         // 删除后 5 秒内可撤销：{ note } 或 null。
         var [undoState, setUndoState] = useState(null)
+        // 备份菜单（低频操作收进「更多」，头部按钮数量不变）。
+        var [menuOpen, setMenuOpen] = useState(false)
         // 左列右边界：便签栏贴着它展开，不压住会话列表。
         var [leftInset, setLeftInset] = useState(measureSidebarLeft)
         var saveTimer = useRef(0)
         var undoTimer = useRef(0)
         var panelRef = useRef(null)
         var tabRef = useRef(null)
+        var menuRef = useRef(null)
+        var menuBtnRef = useRef(null)
+        var fileRef = useRef(null)
         var searchRef = useRef(null)
         // 埋点去抖：同一条便签一次会话里只记一次「编辑」，搜索一次会话只记一次。
         var editedInSession = useRef({})
@@ -898,6 +1038,7 @@
           var restoreFocus = !options || options.restoreFocus !== false
           setQuery('')
           setView('all')
+          setMenuOpen(false)
           setStore(function (prev) {
             return prev.open ? { notes: prev.notes, open: false } : prev
           })
@@ -931,6 +1072,11 @@
             function onKeyDown(event) {
               if (event.key === 'Escape') {
                 event.stopPropagation()
+                // 菜单开着时，Esc 先关菜单；再按一次才清搜索 / 收面板。
+                if (menuOpen) {
+                  setMenuOpen(false)
+                  return
+                }
                 if (query) {
                   setQuery('')
                   return
@@ -952,7 +1098,7 @@
               window.removeEventListener('keydown', onKeyDown, true)
             }
           },
-          [open, close, query],
+          [open, close, query, menuOpen],
         )
 
         // 点面板外面收起。没有全屏遮罩，所以点一下别处既能让面板消失、又不会拦掉那次点击。
@@ -960,9 +1106,17 @@
           function () {
             if (!open || typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
             function onPointerDown(event) {
+              var target = event.target
+              // 菜单是面板里的一小块浮层：点它和触发器以外的地方就收起菜单。
+              if (menuOpen) {
+                var menu = menuRef.current
+                var trigger = menuBtnRef.current
+                var inMenu = menu && target && typeof menu.contains === 'function' && menu.contains(target)
+                var inTrigger = trigger && target && typeof trigger.contains === 'function' && trigger.contains(target)
+                if (!inMenu && !inTrigger) setMenuOpen(false)
+              }
               var panel = panelRef.current
               if (!panel) return
-              var target = event.target
               if (target && typeof panel.contains === 'function' && panel.contains(target)) return
               close({ restoreFocus: false })
             }
@@ -971,7 +1125,7 @@
               document.removeEventListener('pointerdown', onPointerDown, true)
             }
           },
-          [open, close],
+          [open, close, menuOpen],
         )
 
         // Alt+Shift+N 全局开关。
@@ -1138,6 +1292,27 @@
           recordMetric('unarchive')
         }
 
+        // 底部提示条只有一个通道，三种文案：删除了 / 导入了 / 出错了。
+        function toastText(pending) {
+          if (!pending) return ''
+          if (pending.kind === 'import') {
+            var text = t('toast.imported') + ' ' + pending.added + ' ' + t('unit')
+            if (pending.updated) text += ' · ' + t('toast.updated') + ' ' + pending.updated + ' ' + t('unit')
+            return text
+          }
+          if (pending.kind === 'delete') return t('toast.deleted')
+          return pending.text || ''
+        }
+
+        function showToast(next, ms) {
+          setUndoState(next)
+          if (undoTimer.current) window.clearTimeout(undoTimer.current)
+          undoTimer.current = window.setTimeout(function () {
+            undoTimer.current = 0
+            setUndoState(null)
+          }, ms || UNDO_MS)
+        }
+
         // 删除立即生效，但给 5 秒撤销窗口：比「再点一次确认」更不打断思路，也更可逆。
         function removeNote(id) {
           var target = findNote(id)
@@ -1145,21 +1320,26 @@
           setStore(function (prev) {
             return { notes: prev.notes.filter(function (note) { return note.id !== id }), open: prev.open }
           })
-          setUndoState({ note: target })
-          if (undoTimer.current) window.clearTimeout(undoTimer.current)
-          undoTimer.current = window.setTimeout(function () {
-            undoTimer.current = 0
-            setUndoState(null)
-          }, UNDO_MS)
+          showToast({ kind: 'delete', note: target }, UNDO_MS)
           recordMetric('delete')
         }
 
-        function undoDelete() {
+        function undoAction() {
           var pending = undoState
           if (!pending) return
           if (undoTimer.current) {
             window.clearTimeout(undoTimer.current)
             undoTimer.current = 0
+          }
+          if (pending.kind === 'import') {
+            // 导入的撤销 = 整份换回导入前那一份列表，天然可逆，不用逐条比对。
+            var restore = pending.notes
+            setStore(function () {
+              return { notes: restore, open: true }
+            })
+            setUndoState(null)
+            recordMetric('undo')
+            return
           }
           setStore(function (prev) {
             var exists = false
@@ -1203,31 +1383,54 @@
           }
           lines.push('')
 
-          try {
-            var blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
-            var url = URL.createObjectURL(blob)
-            var link = document.createElement('a')
-            var stamp = new Date()
-            link.href = url
-            link.download =
-              'sticky-notes-' +
-              stamp.getFullYear() +
-              pad2(stamp.getMonth() + 1) +
-              pad2(stamp.getDate()) +
-              '-' +
-              pad2(stamp.getHours()) +
-              pad2(stamp.getMinutes()) +
-              '.md'
-            document.body.appendChild(link)
-            link.click()
-            window.setTimeout(function () {
-              link.remove()
-              URL.revokeObjectURL(url)
-            }, 0)
-          } catch (error) {
-            console.warn('[dsh-sticky-notes] 导出失败：', error)
-          }
+          downloadText(stampFilename('.md'), lines.join('\n'), 'text/markdown;charset=utf-8')
         }, [store.notes])
+
+        // 备份（JSON）与恢复：备份是可还原的格式，Markdown 只负责给人看。
+        var exportBackup = function () {
+          if (!store.notes.length) return
+          recordMetric('export')
+          if (downloadText(stampFilename('.json'), backupPayload(store.notes), 'application/json;charset=utf-8')) {
+            showToast({ kind: 'info', text: t('toast.backedUp') }, 4000)
+          }
+        }
+
+        function importBackup(text) {
+          var incoming = parseBackup(text)
+          if (!incoming) {
+            showToast({ kind: 'error', text: t('toast.importFailed') }, 4000)
+            return false
+          }
+          if (!incoming.length) {
+            showToast({ kind: 'error', text: t('toast.importEmpty') }, 4000)
+            return false
+          }
+          var before = store.notes
+          var result = mergeNotes(before, incoming)
+          setStore(function () {
+            return { notes: result.notes.slice(0, MAX_NOTES), open: true }
+          })
+          showToast({ kind: 'import', notes: before, added: result.added, updated: result.updated }, UNDO_MS)
+          recordMetric('import')
+          return true
+        }
+
+        // 选文件这一步只能异步：file.text() 是 Promise。读失败按「不是备份文件」处理。
+        function onFilePick(event) {
+          var input = event && event.target
+          var file = input && input.files && input.files[0]
+          if (!file) return undefined
+          // 清空 value：不然连续导同一个文件不会触发 change。
+          if (typeof input.value === 'string') input.value = ''
+          if (typeof file.text !== 'function') {
+            showToast({ kind: 'error', text: t('toast.importFailed') }, 4000)
+            return undefined
+          }
+          return Promise.resolve(file.text()).then(importBackup, function () {
+            showToast({ kind: 'error', text: t('toast.importFailed') }, 4000)
+            return false
+          })
+        }
 
         var visibleCount = activeNotes.filter(function (note) {
           return note.text.trim().length > 0
@@ -1264,11 +1467,74 @@
               { className: 'dsn-head-actions' },
               h(
                 'button',
+                {
+                  type: 'button',
+                  className: 'dsn-icon-btn dsn-more',
+                  title: t('menu.more'),
+                  'aria-label': t('menu.more'),
+                  'aria-haspopup': 'menu',
+                  'aria-expanded': menuOpen ? 'true' : 'false',
+                  ref: menuBtnRef,
+                  onClick: function () {
+                    setMenuOpen(function (prev) {
+                      return !prev
+                    })
+                  },
+                },
+                IconMore(15),
+              ),
+              h(
+                'button',
                 { type: 'button', className: 'dsn-icon-btn', title: t('export'), 'aria-label': t('export'), onClick: exportNotes, disabled: visibleCount === 0 },
                 IconDownload(15),
               ),
               h('button', { type: 'button', className: 'dsn-icon-btn', title: t('close.esc'), 'aria-label': t('close'), onClick: close }, IconClose(15)),
             ),
+            // 备份与恢复是低频操作：收在「更多」里，头部按钮数量不变。
+            menuOpen
+              ? h(
+                  'div',
+                  { className: 'dsn-menu', role: 'menu', 'aria-label': t('menu.more'), ref: menuRef },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsn-menu-item',
+                      onClick: function () {
+                        setMenuOpen(false)
+                        exportBackup()
+                      },
+                    },
+                    IconDownload(14),
+                    h('span', null, t('menu.backup')),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsn-menu-item',
+                      onClick: function () {
+                        setMenuOpen(false)
+                        var input = fileRef.current
+                        if (input && typeof input.click === 'function') input.click()
+                      },
+                    },
+                    IconUpload(14),
+                    h('span', null, t('menu.restore')),
+                  ),
+                )
+              : null,
+            h('input', {
+              className: 'dsn-file',
+              type: 'file',
+              accept: '.json,application/json',
+              tabIndex: -1,
+              'aria-hidden': 'true',
+              ref: fileRef,
+              onChange: onFilePick,
+            }),
           ),
           h(
             'div',
@@ -1414,14 +1680,20 @@
           undoState
             ? h(
                 'div',
-                { className: 'dsn-toast', role: 'status', 'aria-live': 'polite' },
-                h('span', { className: 'dsn-toast-text' }, t('toast.deleted')),
-                h(
-                  'button',
-                  { type: 'button', className: 'dsn-toast-undo', onClick: undoDelete },
-                  IconUndo(13),
-                  h('span', null, t('toast.undo')),
-                ),
+                {
+                  className: 'dsn-toast' + (undoState.kind === 'error' ? ' is-error' : ''),
+                  role: undoState.kind === 'error' ? 'alert' : 'status',
+                  'aria-live': undoState.kind === 'error' ? 'assertive' : 'polite',
+                },
+                h('span', { className: 'dsn-toast-text' }, toastText(undoState)),
+                undoState.kind === 'error' || undoState.kind === 'info'
+                  ? null
+                  : h(
+                      'button',
+                      { type: 'button', className: 'dsn-toast-undo', onClick: undoAction },
+                      IconUndo(13),
+                      h('span', null, t('toast.undo')),
+                    ),
               )
             : null,
         )
@@ -1484,6 +1756,11 @@
         '.dsn-title{font-size:15px;font-weight:650;letter-spacing:.02em}',
         '.dsn-sub{font-size:11px;color:var(--dsn-fg-2);align-self:baseline}',
         '.dsn-head-actions{margin-left:auto;display:flex;align-items:center;gap:2px}',
+        '.dsn-menu{position:absolute;top:46px;right:10px;z-index:3;min-width:186px;padding:4px;border:1px solid var(--dsn-line);border-radius:10px;background:var(--dsn-surface);box-shadow:0 12px 30px rgba(0,0,0,.22);animation:dsn-toast-in .1s ease-out}',
+        '.dsn-menu-item{display:flex;align-items:center;gap:8px;width:100%;min-height:32px;padding:5px 9px;border:0;border-radius:7px;background:transparent;color:var(--dsn-fg);font:inherit;font-size:12px;text-align:left;cursor:pointer}',
+        '.dsn-menu-item:hover{background:rgba(127,127,127,.14)}',
+        '.dsn-menu-item:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-file{display:none}',
         '.dsn-icon-btn{display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:9px;background:transparent;color:var(--dsn-fg-2);cursor:pointer;font:inherit;transition:background .12s ease,color .12s ease}',
         '.dsn-icon-btn:hover:not(:disabled){background:rgba(127,127,127,.16);color:var(--dsn-fg)}',
         '.dsn-icon-btn:disabled{opacity:.38;cursor:default}',
@@ -1543,6 +1820,7 @@
         '.dsn-empty-title{font-size:13px;font-weight:650;color:var(--dsn-fg)}',
         '.dsn-empty-sub{font-size:11.5px;color:var(--dsn-fg-2)}',
         '.dsn-toast{position:absolute;left:12px;right:12px;bottom:12px;display:flex;align-items:center;gap:8px;padding:8px 8px 8px 12px;border-radius:10px;background:var(--dsn-accent);color:var(--dsn-on-accent);box-shadow:0 8px 24px rgba(0,0,0,.24);animation:dsn-toast-in .12s ease-out}',
+        '.dsn-toast.is-error{background:var(--dsw-alias-state-error-primary,#d84315)}',
         '.dsn-toast-text{font-size:12px;margin-right:auto}',
         '.dsn-toast-undo{display:inline-flex;align-items:center;gap:4px;min-height:24px;border:0;border-radius:7px;padding:3px 9px;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:650;cursor:pointer}',
         '.dsn-toast-undo:hover{background:rgba(127,127,127,.24)}',
