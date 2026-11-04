@@ -2,6 +2,27 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.10] - 2026-11-04
+
+主题：**发布链打通**（功能零变化，只是包身份）。`npm publish --dry-run` 已经把整条链跑通。
+
+### 变更
+
+- **包名改为 `@woshiwenjunjie/dsh-sticky-notes`**：npm 上的 `dsh-sticky-notes` 已被别的作者占用
+  （zllovejn 的同概念插件，latest 1.0.3），同名无法发布。`npm publish --dry-run` 报的
+  「previously published version 1.0.3 is higher than the new version 0.1.9」就是这么发现的。
+- `cordis.patch.yml` 的 `name` 跟着改成带 scope 的包名（市场按 `name` 把 entry 挂到安装的包上）；
+  `id` 保持 `dsh-sticky-notes` 不变——entry id 只需全局唯一，不必等于包名。
+- 校验脚本同步放宽并收紧：`check.mjs` 允许 `@scope/目录名` 形式；`pack-check.mjs` 改为校验
+  patch 的 `name` 必须等于包名（或包名下的子路径），并拒绝 `id:` 行带引号/注释（市场正则会解析失败）。
+
+### 验证
+
+- `node scripts/check.mjs`、`node scripts/pack-check.mjs` 均通过（11 个文件、269.6 kB）。
+- `npm publish --dry-run --access public` **exit 0**，只剩 `npm login` 这一步。
+- 本地安装路径不变：`dsh plugin --profile web add link:<仓库>/plugins/dsh-sticky-notes`；
+  发布后从 npm 安装用 `dsh plugin --profile web add @woshiwenjunjie/dsh-sticky-notes`。
+
 ## [0.1.9] - 2026-11-04
 
 主题：**配色从「眼睛看」变成「可断言」**。1.05:1 那个坑是靠人发现的，这次做成回归测试。

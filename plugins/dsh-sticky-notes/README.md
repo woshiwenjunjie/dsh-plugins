@@ -1,5 +1,7 @@
 # dsh-sticky-notes
 
+> npm 包名：`@woshiwenjunjie/dsh-sticky-notes`（`dsh-sticky-notes` 已被别的作者占用）。
+
 DSH（DeepSeek Harness）Web 界面**左侧的便签栏**：随时把想法记在页面边上，不打断对话。
 
 - 贴在会话列表右边缘，**不遮挡会话列表**，没有全屏遮罩。
@@ -22,7 +24,7 @@ DSH（DeepSeek Harness）Web 界面**左侧的便签栏**：随时把想法记�
 
 ```bash
 # 从 npm 安装（发布后）
-dsh plugin --profile web add dsh-sticky-notes
+dsh plugin --profile web add @woshiwenjunjie/dsh-sticky-notes
 
 # 本地开发：直接链到本目录
 dsh plugin --profile web add link:<本目录绝对路径>

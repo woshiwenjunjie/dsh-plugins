@@ -40,12 +40,25 @@ function checkPlugin(dirName) {
     return
   }
 
-  if (pkg.name !== dirName) fail(dirName, `package.json 的 name（${pkg.name}）应与目录名一致`)
+  // 目录名 = 包名的最后一段（允许 scope：@you/dsh-foo 可以放在 plugins/dsh-foo）。
+  const unscoped = pkg.name && pkg.name.startsWith('@') ? pkg.name.slice(pkg.name.indexOf('/') + 1) : pkg.name
+  if (unscoped !== dirName) {
+    fail(dirName, `package.json 的 name（${pkg.name}）应与目录名一致（或 @scope/${dirName}）`)
+  }
   if (!isSemver(pkg.version)) fail(dirName, 'version 不是合法 semver：' + pkg.version)
   if (!pkg.dsh || !pkg.dsh.bundle || typeof pkg.dsh.bundle.patch !== 'string') {
     fail(dirName, '缺少 dsh.bundle.patch 声明')
   } else if (!fs.existsSync(path.join(pluginDir, pkg.dsh.bundle.patch))) {
     fail(dirName, 'dsh.bundle.patch 指向的文件不存在：' + pkg.dsh.bundle.patch)
+  } else {
+    // bundle patch 的 name 必须指向本包（或本包内的子路径），否则宿主/市场挂不上这个 entry。
+    const patchText = fs.readFileSync(path.join(pluginDir, pkg.dsh.bundle.patch), 'utf8')
+    const nameMatch = /^\s*(?:-\s+)?name\s*:\s*(.+)$/m.exec(patchText)
+    const patchName = nameMatch ? nameMatch[1].trim().replace(/^["']|["']$/g, '') : ''
+    if (!patchName) fail(dirName, 'cordis.patch.yml 里没有 name: 行')
+    else if (patchName !== pkg.name && !patchName.startsWith(pkg.name + '/')) {
+      fail(dirName, `cordis.patch.yml 的 name（${patchName}）必须等于包名（${pkg.name}）或其子路径`)
+    }
   }
   if (!pkg.dsh || !pkg.dsh.client || pkg.dsh.client.platform !== 'web') {
     fail(dirName, '缺少 dsh.client.platform = "web" 声明')

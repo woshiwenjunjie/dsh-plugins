@@ -64,7 +64,30 @@ cd plugins/<name>
 npm publish --access public
 ```
 
-发布后自查（不用等别人反馈）：
+### 包名冲突怎么办
+
+npm 的包名是全球唯一的。发布前先查，别等 `npm publish` 报错：
+
+```bash
+npm view <name> version                # 有输出 = 已被占用
+npm view <name> maintainers description time.modified   # 看看是谁、是什么
+```
+
+被占用时**用带 scope 的包名**（`@你的账号/dsh-xxx`），代价很小：
+
+- `package.json` 的 `name` 改成带 scope 的；
+- `cordis.patch.yml` 的 **`name:` 必须跟着改成同一个字符串**（带 `@` 开头在 YAML 里要加引号）——
+  市场是按 `name` 把 entry 挂到「安装的包」上的（判定规则是 `name === 包名 || name.startsWith(包名 + '/')`，
+  见 `dshmarket/lib/entry-identity.js`）；
+- `id:` **不用改**，它只需要在自己的 profile 里全局唯一（市场会查重复 entry id）；
+- 目录名保持不带 scope 即可，`scripts/check.mjs` 允许 `@scope/<目录名>`。
+
+本仓库的 `dsh-sticky-notes` 就撞过这个坑（`dsh-sticky-notes` 已被另一位作者占用，同名同概念），
+最终用 `@woshiwenjunjie/dsh-sticky-notes` 发布。
+
+### 发布后自查
+
+不用等别人反馈：
 
 ```bash
 npm view <pkg> version dist.tarball    # 版本与产物地址

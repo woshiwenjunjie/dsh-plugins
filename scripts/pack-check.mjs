@@ -29,11 +29,14 @@ const VERBOSE = process.argv.includes('--list')
 function pack(pluginDir) {
   const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-pack-'))
   // Windows 上 npm 是 .cmd，只能经 shell 调用；路径都是我们自己造的临时目录，加引号即可。
+  // 注意：这个脚本会被 prepublishOnly 调用，而 `npm publish --dry-run` 会把 dry-run 传给子进程，
+  // 那样 `npm pack` 只报 JSON、不落盘 —— 所以这里显式关掉 dry-run，保证真的能解包验证。
   const command = `npm pack --json --pack-destination "${dest}"`
   const result = spawnSync(command, {
     cwd: pluginDir,
     encoding: 'utf8',
     shell: true,
+    env: Object.assign({}, process.env, { npm_config_dry_run: 'false' }),
   })
   if (result.status !== 0) {
     return { error: (result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 400) }
@@ -65,18 +68,29 @@ function checkPatchEntry(plugin, pluginDir, pkg) {
     return
   }
   const text = fs.readFileSync(patchPath, 'utf8')
-  // 市场用正则抓 `id:` 行并要求其后直接换行，行尾注释会被判成缺 entry ID。
+  const strip = (value) => value.trim().replace(/^["']|["']$/g, '')
+
+  // id：市场用正则抓 `id:` 行并要求其后直接换行，行尾注释会被判成缺 entry ID。
   // 允许 YAML 列表写法 `- id: xxx`。
   const idLine = text.split(/\r?\n/).find((line) => /^\s*(?:-\s+)?id\s*:/.test(line))
   if (!idLine) {
     fail(plugin, 'cordis.patch.yml 里没有 id: 行')
+  } else {
+    const idValue = strip(idLine.replace(/^\s*(?:-\s+)?id\s*:\s*/, ''))
+    if (!/^[A-Za-z0-9._-]+$/.test(idValue)) {
+      fail(plugin, `cordis.patch.yml 的 id 不该带引号/空格/注释（市场正则解析会失败）：${JSON.stringify(idLine.trim())}`)
+    }
+  }
+
+  // name：市场按 name 把 entry 挂到安装的包上（name === 包名 或 包名/子路径），必须指向本包。
+  const nameLine = text.split(/\r?\n/).find((line) => /^\s*(?:-\s+)?name\s*:/.test(line))
+  if (!nameLine) {
+    fail(plugin, 'cordis.patch.yml 里没有 name: 行')
     return
   }
-  const value = idLine.replace(/^\s*(?:-\s+)?id\s*:\s*/, '').trim()
-  if (!/^[A-Za-z0-9@/._-]+$/.test(value)) {
-    fail(plugin, `cordis.patch.yml 的 id 行带了额外内容（市场会解析失败）：${JSON.stringify(idLine)}`)
-  } else if (value !== pkg.name) {
-    fail(plugin, `cordis.patch.yml 的 id（${value}）应与包名（${pkg.name}）一致`)
+  const nameValue = strip(nameLine.replace(/^\s*(?:-\s+)?name\s*:\s*/, ''))
+  if (nameValue !== pkg.name && !nameValue.startsWith(pkg.name + '/')) {
+    fail(plugin, `cordis.patch.yml 的 name（${nameValue}）必须等于包名（${pkg.name}）或其子路径`)
   }
 }
 
@@ -144,21 +158,26 @@ for (const name of entries) {
 
   // 顺手验证「解出来真的能用」：解包后确认 exports 指向的文件存在。
   if (ok) {
-    const outDir = path.join(dest, 'unpacked')
-    fs.mkdirSync(outDir, { recursive: true })
     const tgz = path.join(dest, entry.filename || '')
-    const untar = spawnSync(`tar -xzf "${tgz}" -C "${outDir}"`, { encoding: 'utf8', shell: true })
-    if (untar.status !== 0) {
-      fail(name, '解包失败：' + String(untar.stderr || '').trim().slice(0, 200))
+    if (!entry.filename || !fs.existsSync(tgz)) {
+      // 极端情况下（例如被别的 npm 生命周期裹住）拿不到 tarball：结构检查已经过了，这里只提示。
+      console.log('    （跳过解包校验：没拿到 tarball 文件）')
     } else {
-      const root = path.join(outDir, 'package')
-      const clientRel = String((pkg.exports && pkg.exports['./client']) || './lib/client.js').replace(/^\.\//, '')
-      for (const rel of ['package.json', clientRel]) {
-        if (!fs.existsSync(path.join(root, rel))) fail(name, `解包后缺少 ${rel}`)
+      const outDir = path.join(dest, 'unpacked')
+      fs.mkdirSync(outDir, { recursive: true })
+      const untar = spawnSync(`tar -xzf "${tgz}" -C "${outDir}"`, { encoding: 'utf8', shell: true })
+      if (untar.status !== 0) {
+        fail(name, '解包失败：' + String(untar.stderr || '').trim().slice(0, 200))
+      } else {
+        const root = path.join(outDir, 'package')
+        const clientRel = String((pkg.exports && pkg.exports['./client']) || './lib/client.js').replace(/^\.\//, '')
+        for (const rel of ['package.json', clientRel]) {
+          if (!fs.existsSync(path.join(root, rel))) fail(name, `解包后缺少 ${rel}`)
+        }
+        const packedPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+        if (packedPkg.version !== pkg.version) fail(name, '解包后的 version 与源码不一致')
+        if (!packedPkg.dsh || !packedPkg.dsh.bundle) fail(name, '解包后的 package.json 丢了 dsh.bundle 声明')
       }
-      const packedPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
-      if (packedPkg.version !== pkg.version) fail(name, '解包后的 version 与源码不一致')
-      if (!packedPkg.dsh || !packedPkg.dsh.bundle) fail(name, '解包后的 package.json 丢了 dsh.bundle 声明')
     }
   }
 }

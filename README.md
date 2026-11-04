@@ -9,7 +9,7 @@
 
 | 插件 | 说明 | 版本 | 文档 |
 |---|---|---|---|
-| **dsh-sticky-notes** | 左侧便签栏：随手记录（草稿不丢）、置顶、搜索（含归档、命中高亮）、一键复制、按会话查看、备份与恢复、5 秒撤销；数据只存本机 | `0.1.9` | [README](plugins/dsh-sticky-notes/README.md) · [CHANGELOG](plugins/dsh-sticky-notes/CHANGELOG.md) |
+| **dsh-sticky-notes** | 左侧便签栏：随手记录（草稿不丢）、置顶、搜索（含归档、命中高亮）、一键复制、按会话查看、备份与恢复、5 秒撤销；数据只存本机 | `0.1.10` | [README](plugins/dsh-sticky-notes/README.md) · [CHANGELOG](plugins/dsh-sticky-notes/CHANGELOG.md) |
 
 ![dsh-sticky-notes](plugins/dsh-sticky-notes/docs/light.png)
 
@@ -17,13 +17,13 @@
 
 ```bash
 # 从 npm 安装（发布后）
-dsh plugin --profile web add dsh-sticky-notes
+dsh plugin --profile web add @woshiwenjunjie/dsh-sticky-notes
 
 # 本地开发 / 尚未发布时：直接链到子目录
 dsh plugin --profile web add link:<仓库绝对路径>/plugins/dsh-sticky-notes
 ```
 
-装好之后刷新页面即可。卸载用 `dsh plugin --profile web remove dsh-sticky-notes`，
+装好之后刷新页面即可。卸载用 `dsh plugin --profile web remove @woshiwenjunjie/dsh-sticky-notes`，
 也可以在 DSH 的「设置 → 插件」里管理。
 
 ## 目录结构

@@ -5,4 +5,6 @@
 # additionally 加载 ./client（lib/client.js，浏览器半侧）。
 - insert:
     - id: dsh-sticky-notes
-      name: dsh-sticky-notes
+      # name 必须等于包名（市场按 name 把 entry 挂到安装的包上）；
+      # 带 scope 的名字以 @ 开头，YAML 里要加引号。
+      name: "@woshiwenjunjie/dsh-sticky-notes"
