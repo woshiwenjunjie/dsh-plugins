@@ -568,6 +568,70 @@ check('搜索时「全部」标签高亮', filterTabs()[0].props['aria-selected'
 check('搜索时「已归档」标签不再高亮', filterTabs()[1].props['aria-selected'], 'false')
 check('搜索仍命中归档便签', shownTexts(), [ARCHIVED_TEXT])
 
+// ---------------------------------------------------------------- 标签搜索
+//
+// 没有标签表、没有新字段：标签就是正文里的 `#xxx`，现解析。
+// `#` 开头的词按标签筛（前缀匹配），其余词按正文，多个条件 AND。
+
+const tagSeed = [
+  { id: 't1', text: '#想法 把便签栏做成可折叠的', color: 'amber', createdAt: now - 6000, updatedAt: now - 6000 },
+  { id: 't2', text: '#想法 #待办 周五前给设计稿', color: 'sky', createdAt: now - 5000, updatedAt: now - 5000 },
+  { id: 't3', text: '#读书 《卡片笔记法》第三章', color: 'mint', createdAt: now - 4000, updatedAt: now - 4000 },
+  { id: 't4', text: '没有标签的一条普通便签', color: 'rose', createdAt: now - 3000, updatedAt: now - 3000 },
+  { id: 't5', text: '#Deploy 发布前确认回滚方案', color: 'violet', createdAt: now - 2000, updatedAt: now - 2000 },
+  {
+    id: 't6',
+    text: '归档的一条 #想法',
+    color: 'mint',
+    archived: true,
+    archivedAt: now - 1000,
+    createdAt: now - 7000,
+    updatedAt: now - 7000,
+  },
+]
+function sortedShown() {
+  return shownTexts().slice().sort()
+}
+function emptyTitle() {
+  const el = elements.find((node) => node.props.className === 'dsn-empty-title')
+  return el && el.props.children
+}
+
+remount(tagSeed)
+check('便签够多时出现搜索框（标签用例）', Boolean(searchInput()), true)
+
+act(() => searchInput().props.onChange({ target: { value: '#想法' } }))
+check('按标签筛出全部带该标签的便签（含归档）', sortedShown(), ['#想法 把便签栏做成可折叠的', '#想法 #待办 周五前给设计稿', '归档的一条 #想法'].sort())
+check('标签连同 # 一起高亮', marks().map((el) => el.props.children), ['#想法', '#想法', '#想法'])
+
+// 前缀匹配：打一半就能筛（词表是「边打边筛」，不该要求打完整个标签）
+act(() => searchInput().props.onChange({ target: { value: '#想' } }))
+check('标签支持前缀匹配', sortedShown().length, 3)
+
+// 大小写不敏感（英文标签常见大小写混写）
+act(() => searchInput().props.onChange({ target: { value: '#dep' } }))
+check('英文标签大小写不敏感', sortedShown(), ['#Deploy 发布前确认回滚方案'])
+
+// 标签 + 正文关键词 = AND
+act(() => searchInput().props.onChange({ target: { value: '#想法 待办' } }))
+check('标签和关键词叠加（AND）', sortedShown(), ['#想法 #待办 周五前给设计稿'])
+
+// 只敲一个 `#` 还不构成条件：列表照旧、卡片仍可编辑
+act(() => searchInput().props.onChange({ target: { value: '#' } }))
+check('只敲 # 不算搜索：列表回到当前视图', cardTexts().length, 5)
+check('只敲 # 时卡片仍可编辑', noteViews().length, 0)
+
+// 匹配不到的标签：如实给空状态，而不是把列表清空却不说原因
+act(() => searchInput().props.onChange({ target: { value: '#不存在' } }))
+check('标签无命中时给空状态', emptyTitle(), '没有匹配的便签')
+
+// 正文里的 `#` 不要求前后有空格：文中出现的 #想法 也能被筛出来（t6 就是这么写的）
+act(() => searchInput().props.onChange({ target: { value: '#想法' } }))
+check('标签出现在句中也算', sortedShown().indexOf('归档的一条 #想法') !== -1, true)
+
+act(() => searchInput().props.onChange({ target: { value: '' } }))
+check('清空标签搜索回到当前视图', cardTexts().length, 5)
+
 // 收起后焦点要还给左边缘标签，键盘用户不会掉到页面开头。
 focusedElement = null
 act(() => closeButton().props.onClick({}))
@@ -938,5 +1002,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
 )

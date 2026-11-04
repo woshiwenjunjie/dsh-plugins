@@ -351,7 +351,7 @@
         saved: '已自动保存到本机',
         'save.failed': '保存失败，请先导出',
         save: '记下',
-        'search.placeholder': '搜索便签…（Ctrl+K）',
+        'search.placeholder': '搜索便签…（Ctrl+K；#标签 可按标签筛）',
         'search.aria': '搜索便签',
         'search.clear': '清除搜索',
         'empty.none': '还没有便签',
@@ -425,7 +425,7 @@
         saved: 'Saved locally',
         'save.failed': "Couldn't save — export first",
         save: 'Save',
-        'search.placeholder': 'Search notes… (Ctrl+K)',
+        'search.placeholder': 'Search notes… (Ctrl+K, #tags work)',
         'search.aria': 'Search notes',
         'search.clear': 'Clear search',
         'empty.none': 'No notes yet',
@@ -890,11 +890,101 @@
         return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
       }
 
-      function highlightSegments(text, query) {
+      // ------------------------------------------------------------ 标签
+      //
+      // 没有标签表、没有额外字段：标签就是正文里的 `#xxx`，用的时候现解析。
+      // 这样标签不会和数据格式 / 备份格式耦合——老备份、老便签照样能用。
+      // 允许字母、数字、下划线和连字符（含中文）；遇到空格或标点就结束。
+      var TAG_PATTERN = /#([\p{L}\p{N}_-]+)/gu
+      // 同一条便签每个渲染 pass 都会被问一次标签：按正文缓存，别每次按键重跑正则。
+      var tagCache = {}
+
+      function tagsOf(text) {
         var source = String(text == null ? '' : text)
-        var keyword = String(query || '').trim()
-        if (!keyword) return [source]
-        var parts = source.split(new RegExp('(' + escapeRegExp(keyword) + ')', 'gi'))
+        var cached = tagCache[source]
+        if (cached) return cached
+        var tags = []
+        TAG_PATTERN.lastIndex = 0
+        var match = TAG_PATTERN.exec(source)
+        while (match) {
+          var tag = match[1].toLowerCase()
+          if (tags.indexOf(tag) === -1) tags.push(tag)
+          match = TAG_PATTERN.exec(source)
+        }
+        // 缓存别无限长：正文一改就是一个新 key，随手清掉最省事。
+        if (Object.keys(tagCache).length > 400) tagCache = {}
+        tagCache[source] = tags
+        return tags
+      }
+
+      /**
+       * 把搜索词编译成「条件」：按空格切 token，`#` 开头的是标签条件（前缀匹配，
+       * 所以打 `#想` 能筛出 `#想法`），其余是正文关键词。多个条件 AND。
+       *
+       * 单条缓存：父组件筛列表、每张卡片画高亮都要同一份结果，按 query 字符串命中即可。
+       */
+      var lastSearchKey = null
+      var lastSearchValue = null
+
+      function buildSearch(raw) {
+        var text = String(raw == null ? '' : raw).trim()
+        var search = { active: false, tags: [], words: [], parts: [], pattern: '' }
+        if (!text) return search
+        var tokens = text.split(/\s+/)
+        for (var i = 0; i < tokens.length; i += 1) {
+          var token = tokens[i]
+          if (!token) continue
+          if (token.charAt(0) === '#') {
+            var tag = token.slice(1).toLowerCase()
+            if (tag && search.tags.indexOf(tag) === -1) search.tags.push(tag)
+          } else if (search.words.indexOf(token.toLowerCase()) === -1) {
+            search.words.push(token.toLowerCase())
+          }
+        }
+        // 高亮用：标签连 `#` 一起标；长的先匹配，免得 `#想法` 被 `#想` 抢先切碎。
+        for (var t = 0; t < search.tags.length; t += 1) search.parts.push('#' + search.tags[t])
+        for (var w = 0; w < search.words.length; w += 1) search.parts.push(search.words[w])
+        search.parts.sort(function (a, b) {
+          return b.length - a.length
+        })
+        search.active = search.tags.length > 0 || search.words.length > 0
+        if (search.parts.length) search.pattern = search.parts.map(escapeRegExp).join('|')
+        return search
+      }
+
+      function searchOf(query) {
+        var key = String(query == null ? '' : query)
+        if (key === lastSearchKey) return lastSearchValue
+        lastSearchKey = key
+        lastSearchValue = buildSearch(key)
+        return lastSearchValue
+      }
+
+      function matchesSearch(note, search) {
+        var text = String(note && note.text != null ? note.text : '').toLowerCase()
+        for (var w = 0; w < search.words.length; w += 1) {
+          if (text.indexOf(search.words[w]) === -1) return false
+        }
+        if (!search.tags.length) return true
+        var tags = tagsOf(note.text)
+        for (var t = 0; t < search.tags.length; t += 1) {
+          var want = search.tags[t]
+          var hit = false
+          for (var i = 0; i < tags.length; i += 1) {
+            if (tags[i].indexOf(want) === 0) {
+              hit = true
+              break
+            }
+          }
+          if (!hit) return false
+        }
+        return true
+      }
+
+      function highlightSegments(text, search) {
+        var source = String(text == null ? '' : text)
+        if (!search || !search.pattern) return [source]
+        var parts = source.split(new RegExp('(' + search.pattern + ')', 'gi'))
         var out = []
         for (var i = 0; i < parts.length; i += 1) {
           if (!parts[i]) continue
@@ -995,11 +1085,13 @@
 
         var archived = note.archived === true
         var query = props.query || ''
+        var search = searchOf(query)
         var editing = props.editing === true
         var onStartEdit = props.onStartEdit
         // 搜索时把正文切成「只读 + 高亮」：textarea 里画不了 <mark>。
-        // 点一下这一条就切回可编辑（只有它，其它仍是只读），不打断「正在找什么」。
-        var readingOnly = query.trim().length > 0 && !editing
+        // 点一下这一条就切回可编辑（只有这一条，其它仍是只读），不打断「正在找什么」。
+        // 只敲一个 `#` 还不算搜索（没有任何条件），列表和卡片都保持原样。
+        var readingOnly = search.active && !editing
 
         return h(
           'article',
@@ -1089,7 +1181,7 @@
                         }
                       },
                 },
-                highlightSegments(note.text, query),
+                highlightSegments(note.text, search),
               )
             : h(AutoTextarea, {
                 className: 'dsn-note-input',
@@ -1348,18 +1440,19 @@
 
         var baseList = view === 'archived' ? archivedNotes : view === 'session' ? sessionNotes : activeNotes
         // 搜索时列表覆盖全部（含归档），标签同步高亮「全部」，否则标签和结果对不上。
-        var activeTab = query.trim() ? 'all' : view
+        var search = searchOf(query)
+        var activeTab = search.active ? 'all' : view
         var filteredNotes = useMemo(
           function () {
-            var keyword = query.trim().toLowerCase()
-            if (!keyword) return baseList
-            // 有搜索词就搜全部（含已归档）：便签最痛的失败是「找不到」，
+            if (!search.active) return baseList
+            // 有搜索条件就搜全部（含已归档）：便签最痛的失败是「找不到」，
             // 「它不在当前视图里」不该成为找不到的理由。点过滤标签会清掉搜索词，语义不打架。
+            // `#标签` 是标签条件（前缀匹配），其余词是正文关键词，多个条件 AND。
             return notes.filter(function (note) {
-              return note.text.toLowerCase().indexOf(keyword) !== -1
+              return matchesSearch(note, search)
             })
           },
-          [baseList, query, notes],
+          [baseList, search, notes],
         )
         var searchable = notes.length >= SEARCH_THRESHOLD
 
@@ -2253,8 +2346,8 @@
               ? h(
                   'div',
                   { className: 'dsn-empty' },
-                  h('div', { className: 'dsn-empty-title' }, query ? t('empty.search') : view === 'archived' ? t('empty.archived') : view === 'session' ? t('empty.session') : t('empty.none')),
-                  h('div', { className: 'dsn-empty-sub' }, query ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : view === 'session' ? t('empty.session.sub') : t('empty.none.sub')),
+                  h('div', { className: 'dsn-empty-title' }, search.active ? t('empty.search') : view === 'archived' ? t('empty.archived') : view === 'session' ? t('empty.session') : t('empty.none')),
+                  h('div', { className: 'dsn-empty-sub' }, search.active ? t('empty.search.sub') : view === 'archived' ? t('empty.archived.sub') : view === 'session' ? t('empty.session.sub') : t('empty.none.sub')),
                 )
               : filteredNotes.map(function (note) {
                   var cardProps = {
