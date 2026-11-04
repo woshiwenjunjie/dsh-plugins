@@ -192,20 +192,71 @@ dsh plugin --profile web add link:<同一个绝对路径>
 
 ## 9. 测试
 
-本仓库用三件套，都不依赖 DSH 运行：
+本仓库用四件套，都不依赖 DSH 运行：
 
 1. **语法检查**：`new vm.Script(source)` 只编译不执行（client.js 顶层读 `window`，直接跑会炸）。
 2. **冒烟测试**（`test/smoke.mjs`）：假 `window` / `react` / `ctx`，跑真实的 `factory → apply → 组件渲染`，
    断言注册的 slot、关键元素、ARIA 状态。能抓到「加载即抛」「注册到错的槽」「渲染丢元素」。
-3. **静态预览**（`test/preview.mjs`）：把组件真实输出序列化成 HTML，套上 DSH 主题 token 的静态外壳，
+3. **行为测试**（`test/behavior.mjs`）：自己实现一个迷你 React（`useState` 真存状态、
+   `useMemo`/`useCallback` 按依赖缓存、`memo` 带 per-key 缓存、`useEffect` 按依赖执行、
+   定时器用虚拟时钟 `advance(ms)`），直接驱动组件点按钮、打字、拖放、传文件。
+   这是唯一能在没有浏览器的情况下测「交互后果」的一层。
+4. **对比度测试**（`test/contrast.mjs`）：从 DSH 主题包的真实 CSS 里解析 `--dsw-*`
+   声明（按 `body[data-ds-dark-theme]` 分浅/深两套），递归解析 `var()` 链，按 WCAG 公式算真实配色对。
+   找不到主题包就 SKIP，所以 CI 上没装 DSH 也不会挂。
+5. **静态预览**（`test/preview.mjs`）：把组件真实输出序列化成 HTML，套上 DSH 主题 token 的静态外壳，
    用无头浏览器截图核对浅色 / 深色 / 收起态。
 
 ```bash
-node scripts/check.mjs                      # 全仓库：结构 + 语法 + 冒烟
-node plugins/dsh-my-plugin/test/preview.mjs # 生成预览页
+node scripts/check.mjs                       # 全仓库：结构 + 语法 + 上面这些测试
+node scripts/pack-check.mjs --list           # 真的 npm pack 一遍，检查产物
+node plugins/dsh-my-plugin/test/preview.mjs  # 生成预览页
 ```
 
-## 10. 常见坑
+### 写行为测试的两个坑
+
+- **hook 要有真语义**：假 React 里 `useMemo(factory)` 如果忽略依赖数组，每次都返回新对象，
+  那么给组件加的 `memo` 永远不会命中——量出来的数据是假的。依赖缓存必须实现。
+- **定时器要有时钟**：`setTimeout` 一调度就执行的话，「5 秒撤销窗口」「300ms 去抖落盘」这类
+  行为根本测不到（刚设上就被执行掉了）。用虚拟时钟，测试里显式 `advance(300)`。
+
+## 10. 发布相关的硬规则（都是撞出来的）
+
+### 市场怎么把 entry 挂到你的包上
+
+看 `dshmarket/lib/entry-identity.js` 的真实判定：
+
+```js
+name === packageName || name.startsWith(`${packageName}/`)
+```
+
+所以 **`cordis.patch.yml` 的 `name:` 必须等于包名（或包名下的子路径）**，
+而 `id:` 只需要在 profile 里全局唯一，**不必等于包名**。包名带 scope 时：
+
+```yaml
+- insert:
+    - id: my-plugin                 # 纯 token，不加引号、不写行尾注释
+      name: "@you/my-plugin"        # @ 开头在 YAML 里必须加引号
+```
+
+### npm 包名可能已经被占用
+
+`npm publish` 之前先 `npm view <name> version`。被占用时的报错长这样：
+
+```
+Cannot implicitly apply the "latest" tag because previously published version 1.0.3
+is higher than the new version 0.1.9
+```
+
+这不是版本号问题，是**名字被别人占了**。解法是发到自己的 scope 下（`@you/dsh-xxx`），
+再按上面的规则同步改 `name:`。
+
+### 打包产物和源码树是两回事
+
+`files` 白名单对不对、`test/` 有没有混进去、icon 有没有超 256KiB、包内产物是不是最新的，
+只有真跑 `npm pack` 才看得见。把它做成脚本 + CI job + `prepublishOnly`，就不用每次发布手工检查。
+
+## 11. 常见坑
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
@@ -219,3 +270,10 @@ node plugins/dsh-my-plugin/test/preview.mjs # 生成预览页
 | 两个标签页来回覆盖数据 | 内容与界面状态存在同一个 key，且互相回写 | 拆 key + storage 事件做相等比较 |
 | 拖动侧栏后面板位置没跟上 | 只监听了 window resize | 加 `ResizeObserver` 观察左列 |
 | 冒烟测试「渲染不出面板」 | 组件只有在 open 时才构造面板 | 测试里预置开合状态 |
+| 加了 `memo` 但没变快 | 传下去的 `t` / 对象 / 回调每次渲染都是新引用，浅比较必然失败 | 用 `useMemo`/`useCallback` 稳住 props；回调里别闭包可变状态，改读 ref |
+| 打字时列表跳位 | 排序键（如 `updatedAt`）在输入时被刷新 | 打字期间不动排序键，失焦/提交时再更新 |
+| 存储写失败但界面显示「已保存」 | 写入函数吞了异常，调用方无条件当成成功 | 写入返回成败，失败要如实提示 |
+| 小字用语义色当文字色，对比度贴线 | 语义色是按「背景/图标」设计的，不一定满足 4.5:1 | 文字用 label 色、语义色只做边框/圆点，用对比度测试卡住 |
+| 想读「当前会话」读不到 | slot 组件只取了 `locale`，把标准 kit props 丢了 | 注册函数把收到的 props 原样转发（`useSessions` 在里面） |
+| 拖动排序把其他交互弄丢 | 逐字段重建 note 对象时漏了新字段（`order` / `sessionId`） | 重建地方全部带上；`normalizeNote` 给老数据兜底 |
+

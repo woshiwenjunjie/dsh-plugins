@@ -1,12 +1,13 @@
 # dsh-sticky-notes
 
-> npm 包名：`@woshiwenjunjie/dsh-sticky-notes`（`dsh-sticky-notes` 已被别的作者占用）。
-
 DSH（DeepSeek Harness）Web 界面**左侧的便签栏**：随时把想法记在页面边上，不打断对话。
 
 - 贴在会话列表右边缘，**不遮挡会话列表**，没有全屏遮罩。
-- 就地编辑、换色、置顶、搜索、归档、5 秒撤销；`Alt + Shift + N` 随时开关。
+- 就地编辑、置顶、换色、拖动排序、搜索（含归档、命中高亮）、按会话查看、备份恢复、5 秒撤销。
 - 数据只存**本机浏览器 localStorage**：不经 Host、不上报、不发网络请求。
+- 快捷键 `Alt + Shift + N` 随时开关。
+
+> npm 包名：`@woshiwenjunjie/dsh-sticky-notes`（`dsh-sticky-notes` 已被别的作者占用）。
 
 ![便签栏（浅色）](docs/light.png)
 
@@ -32,6 +33,19 @@ dsh plugin --profile web add link:<本目录绝对路径>
 
 也可以在 DSH 的「设置 → 插件」里安装。安装后刷新页面即可看到左边缘的「便签」标签。
 
+## 能力一览
+
+| 方面 | 有什么 |
+|---|---|
+| 捕获 | `Ctrl/Cmd + Enter` 记下；草稿实时落盘（刷新不丢）；新便签永远在最上面 |
+| 组织 | 置顶、5 种颜色条、**拖动排序**（键盘 `↑`/`↓` 等价）、归档、`⋯`→「重排：按最近改动」 |
+| 检索 | 搜索结果跨全部便签（含归档）、命中片段高亮、点一下那条就切回编辑；`Ctrl/Cmd + K` 聚焦 |
+| 上下文 | 新便签记下所在**会话**，可切「本会话」视图（拿不到会话信息时该视图自动隐藏） |
+| 数据 | JSON 备份可**还原**（按 id 合并、可撤销）、Markdown 导出给人看、多标签页同步 |
+| 安全网 | 删除 5 秒撤销；保存失败如实报错；非法备份只提示不动数据 |
+| 可达性 | 命中区 ≥ 24px、对比度全部过 WCAG AA（有测试）、`Esc` 分层退出、收起后焦点归还 |
+| 性能 | 卡片 memo 化：打字只重渲染 1 张；300 条稳态 0.30ms |
+
 ## 用法
 
 | 操作 | 方式 |
@@ -39,115 +53,71 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | 展开 / 收起 | 点左边缘的「便签」标签；`Esc`；点面板外面 |
 | 全局开关 | `Alt + Shift + N` |
 | 记下一条 | 顶部输入框，`Ctrl/Cmd + Enter` 或点「记下」 |
+| 编辑 | 直接点便签正文改；搜索态下点一下那条只切回这一条 |
+| 排序 | 拖卡片左边缘的把手（hover 显现）；或聚焦把手按 `↑` / `↓`；`⋯`→「重排：按最近改动」复位 |
 | 复制一条 | 鼠标移到便签上（或键盘聚焦卡片）→ 右下角出现复制按钮 |
-| 排序 | 拖卡片左边缘的把手（hover 显现）；或聚焦把手按 `↑` / `↓`；`⋯` → 「重排：按最近改动」复位 |
-| 编辑 / 换色 / 置顶 / 归档 / 删除 | 每条便签下方的一排按钮 |
+| 换色 / 置顶 / 归档 / 删除 | 每条便签下方的一排按钮 |
 | 撤销删除 | 删除后 5 秒内点底部「撤销」 |
-| 搜索 | 便签 ≥ 6 条时出现搜索框，`Ctrl/Cmd + K` 聚焦；搜全部便签（含已归档），命中片段高亮 |
-| 搜索态编辑 | 搜索时正文是只读高亮，**点一下那一条**就切回编辑（其余保持只读）；`Esc` 清空搜索 |
-| 归档视图 | 列表上方的「全部 / 本会话 / 已归档」 |
+| 搜索 | 便签 ≥ 6 条时出现搜索框，`Ctrl/Cmd + K` 聚焦，`Esc` 先清搜索 |
+| 视图切换 | 「全部 / 本会话 / 已归档」 |
+| 备份 / 恢复 | 右上角 `⋯` →「导出备份（JSON）」/「从备份恢复…」 |
 | 导出 | 右上角导出按钮 → Markdown（文末附本机使用统计） |
-| 备份 / 恢复 | 右上角 `⋯` → 「导出备份（JSON）」/「从备份恢复…」 |
 
-## 可用性基线（P0）
+## 设计取舍
 
-| 项目 | 之前 | 现在 |
-|---|---|---|
-| 换色按钮命中区 | 14×14 | 24×24（WCAG 2.2 AA 底线） |
-| 删除按钮命中区 | 22×22 | 28×28 |
-| 头部图标按钮 | 28×28 | 32×32 |
-| 暗色主题品牌按钮 | 白字压近白底 1.05:1（几乎不可见） | 反色文字 15.03:1 |
-| 浅色主题品牌按钮 | 18.90:1 | 18.90:1 |
-| 提示文字 / 时间戳 | 浅色 5.80 / 深色 10.42 | 浅色 5.80 / 深色 10.42（卡片加 8% 底纹后时间戳 5.32，仍过 AA） |
-| 面板是否遮挡会话列表 | 遮住整个 248px 左列 + 全屏压暗 | 遮挡 0px，无遮罩 |
+- **抽屉不遮挡**：面板贴在会话列表右边界展开（量 `[data-dsh-sidebar-root]` + `ResizeObserver` 跟随拖动/折叠），
+  而不是盖住左侧一列，也没有全屏压暗——记便签不该让你看不见会话。
+- **删除用「5 秒撤销」而不是「点两次确认」**：确认框会打断思路，撤销不会。
+- **排序是「你排的」**：拖动之后顺序固定，编辑不再把便签顶到最上面（否则一编辑就打乱手动顺序）。
+  新便签永远落最上面，`⋯` 里留了按时间重排的兜底。
+- **搜索阈值 6 条**：少于 6 条时列表一眼看得完，搜索框只会占地方。
+- **控件自研而非用 primitives 的 Button/Input**：300px 抽屉的密度不适合设置页尺度的控件。
 
-颜色全部走 DSH 主题 token；压在品牌色上的文字用 `--dsw-alias-bg-layer-1`（反色），
-因为品牌色在 light 主题下是近黑、dark 主题下是近白，写死 `#fff` 在暗色主题会变成白底白字。
+## 记下就不会丢
 
-## 可逆、可召回、可度量（P1）
+- **草稿实时落盘**：还没按「记下」的内容存在 `dsh-sticky-notes:draft`，刷新页面、重装插件、
+  手滑关页面回来还在；按「记下」后立即清掉。
+- **保存失败如实说**：localStorage 写不进去（满了 / 被禁用）时提示变红「保存失败，请先导出」，
+  恢复可写后自动回到「已保存」——不会给你一个假的「已保存」。
+- **中文输入法安全**：组词选字时按回车不会被当成「记下」。
+- **多标签页同步**：内容与开合状态分两个 key 存，两个标签页同时开着不会互相覆盖。
 
-| 改动 | 之前 | 现在 |
-|---|---|---|
-| 删除 | 点两次确认（打断思路、不可逆） | 立即删除 + 5 秒内「撤销」（`aria-live` 提示） |
-| 召回 | 列表线性扫，没有搜索 | ≥ 6 条出搜索框，`Ctrl/Cmd + K` 聚焦，`Esc` 先清搜索 |
-| 组织 | 只有时间序 | 图钉置顶（置顶排最前，带 `aria-pressed`） |
-| 度量 | 没有数据，优化靠直觉 | 本机埋点 10 项，导出 Markdown 时附统计 |
+## 找得回
 
-## 系统化与一致性（P2）
+- **搜索跨视图**：有关键词就搜全部（含已归档），命中的归档便签带「已归档」标记、保持只读；
+  此时过滤标签同步高亮「全部」，语义不打架。
+- **命中高亮**：`<textarea>` 里画不出 `<mark>`，所以搜索态正文切成「只读 + 高亮」渲染；
+  **点一下那条**就只把这一条切回 `textarea` 并自动聚焦，其余仍只读，搜索词不变。
+- **本会话视图**：新便签记下它是在哪个会话里写的，切会话时该视图自动跟着变。
 
-| 改动 | 说明 |
-|---|---|
-| i18n | 接入 `ctx.locale`：zh 键集真源，en 对齐，其余语言按 en 回退；语言切换即时生效 |
-| 归档 | 归档 / 恢复 + 过滤；归档卡片置灰、只读、主视图不占位 |
-| 图标 | 换用 DSH primitives 的 Fluent 图标，取不到时回退手绘 SVG |
-| 动效 | 面板与撤销条 120ms，`prefers-reduced-motion` 下关闭 |
-| 控件取舍 | 保存按钮 / 输入框 / 撤销条保留自研紧凑控件（300px 抽屉的密度不适合设置页尺度的 primitives Button/Input） |
-
-## 落地手感（0.1.2 / 0.1.3）
-
-用起来才发现的几个问题，都改在最痛的地方：
-
-| 问题 | 之前 | 现在 |
-|---|---|---|
-| 编辑时卡片跳位 | 每敲一个字就把这张便签顶到列表最前，滚动位置跟着跳 | 打字过程中不动排序，失焦后才更新「最近改动」；没真改过的点击不算 |
-| 存储写失败 | localStorage 满了仍然显示「已自动保存」，刷新后内容没了 | 显示红色「保存失败，请先导出」（`role="alert"`），恢复可写后自动回到「已保存」 |
-| 中文输入法 | 组词选字时按回车，半句话被当成一条便签存下、草稿被清空 | 判断 `isComposing`，组词期间回车只选词 |
-| 搜不到归档便签 | 搜索只过滤当前视图，归档的必须先切「已归档」再搜 | 有关键词就搜全部（含归档），命中的带「已归档」标记、保持只读 |
-| 收起后焦点丢失 | `Esc` 收起后焦点掉回页面开头，键盘用户要重新 Tab 一大圈 | 焦点回到左边缘的「便签」标签；点面板外面收起时不抢焦点 |
-
-这些由 `test/behavior.mjs` 守着：用迷你 React 真跑组件状态与依赖，修复前跑会失败。
-
-## 备份与恢复（0.1.4）
+## 备份与恢复
 
 数据只在你这台浏览器的 localStorage 里，所以**备份是唯一的安全网**：
 
 | 动作 | 产物 | 用途 |
 |---|---|---|
 | 导出 | `sticky-notes-日期.md` | 给人读、贴到别处 |
-| 导出备份 | `sticky-notes-日期.json` | **可还原**，保留 id / 颜色 / 置顶 / 归档 / 时间戳 |
-| 从备份恢复 | — | 读 JSON，按 `id` 合并：同 id 取 `updatedAt` 较新的，新 id 追加 |
+| 导出备份 | `sticky-notes-日期.json` | **可还原**：id / 颜色 / 置顶 / 归档 / 会话 / 顺序 / 时间戳全保留 |
+| 从备份恢复 | — | 按 `id` 合并：同 id 取 `updatedAt` 较新的，新 id 追加，提示「已导入 N 条 · 更新 M 条」 |
 
-- 合并**不静默覆盖**：提示条会报「已导入 N 条 · 更新 M 条」。
 - 导入后 5 秒内可撤销（整份换回导入前）。
-- 认不出文件（不是本插件备份）或备份里没有便签时，只提示、不动原有数据。
+- 认不出文件或备份里没有便签时只提示，**一个字节都不动**现有数据。
+- 老便签没有会话 / 顺序字段：读取时按 `-updatedAt` 兜底，等价于以前「最近改动在前」，不强制迁移。
 
-## 按会话看便签（0.1.6）
+## 键盘与可达性
 
-新写下的便签会记下它是在**哪个会话**里写的，过滤条因此多一个「本会话」：
-
-| 标签 | 显示什么 |
+| 项 | 值 / 做法 |
 |---|---|
-| 全部 | 所有未归档便签（含老便签） |
-| 本会话 | 只在当前会话里写下、且未归档的便签；切会话时自动跟着变 |
-| 已归档 | 归档的便签 |
+| 全局开关 | `Alt + Shift + N` |
+| 记下 | `Ctrl/Cmd + Enter`（输入法组词中不触发） |
+| 搜索 | `Ctrl/Cmd + K` 聚焦；`Esc` 先清搜索 |
+| 退出层级 | `Esc`：先关菜单 → 再清搜索 → 最后收面板 |
+| 焦点 | 收起后焦点回到左边缘的「便签」标签；点面板外面收起时不抢焦点 |
+| 排序 | 把手聚焦后 `↑` / `↓` 移动一格 |
+| 命中区 | 换色 24×24、删除 28×28、头部/卡片图标 32×32（WCAG 2.2 AA 底线 24px） |
+| 对比度 | 全部走 DSH 主题 token，`npm run contrast` 用真实 token 值算 WCAG 比值（见下表） |
 
-- 老便签没有会话信息，只出现在「全部」里，**不强制迁移**。
-- 如果 DSH 没把会话信息交给插件（换版本后接口变了），「本会话」标签**不会出现**，
-  便签栏仍是一个纯本地工具——不会留一个点了没反应的按钮。
-- 会话信息只存在本机便签数据里，导出备份时一并保留。
-
-## 搜索命中高亮（0.1.7）
-
-`<textarea>` 里画不出 `<mark>`，所以搜索时正文会切换成「只读 + 高亮」的渲染形态：
-
-- 命中的片段加 `<mark>`（中性半透明底 + 加粗），换行原样保留。
-- **点一下那条只读正文**，只有这一条切回 `textarea` 并自动聚焦，其余仍是只读，搜索词不变。
-- 归档便签在搜索态保持纯只读（没有可点击/可聚焦语义），不会假装能编辑。
-- 清空搜索（`Esc`）后所有卡片回到常态 `textarea`，高亮消失。
-
-## 半句话不会丢（0.1.8）
-
-- **草稿实时落盘**：还没按「记下」的内容存在 `dsh-sticky-notes:draft`，刷新页面、重装插件回来还在；
-  按「记下」后立即清掉。
-- **一键复制**：鼠标移到便签上（或键盘把焦点移进卡片）时右下角出现复制按钮，复制后提示「已复制这条便签」。
-  剪贴板不可用时如实报错让你手动选文本，不假装成功。
-- 复制按钮平时是隐形的（`opacity:0`，`focus-visible` 会显形），静态列表不多一排图标。
-
-## 配色与对比度（0.1.9）
-
-配色全部走 DSH 主题 token，而且**有回归测试**：`npm run contrast` 会从
-`@deepseek-ai/dsh-client-ui-theme` 的真实 CSS 里解析 token 取值，一路解析 `var()` 链，
-再用 WCAG 公式算我们实际用到的 8 组配色对。找不到主题包就 SKIP（CI 上没有 DSH 不影响）。
+实测对比度（`npm run contrast` 的输出）：
 
 | 用例 | 浅色 | 深色 |
 |---|---|---|
@@ -155,11 +125,8 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | 次要文字（时间、提示）/ 面板底 | 5.80 ✓ | 10.42 ✓ |
 | 品牌底色上的文字（按钮、提示条） | 18.90 ✓ | 15.03 ✓ |
 | 错误提示文字 / 面板底 | 18.90 ✓ | 15.03 ✓ |
-| 错误色边框 / 错误小字圆点 | 4.50 ✓ | 4.77 ✓ |
+| 错误色边框 / 保存失败圆点 | 4.50 ✓ | 4.77 ✓ |
 | 搜索高亮片段文字 / 高亮底色 | 13.39 ✓ | 10.08 ✓ |
-
-0.1.9 修的就是这里量出来的问题：错误色在浅色主题下压白底只有 **4.498:1**（阈值 4.5），
-所以错误小字改成「正文色 + 错误色圆点」，错误提示条改成「面板底 + 错误色边框」。
 
 ## 数据存在哪
 
@@ -172,8 +139,7 @@ dsh plugin --profile web add link:<本目录绝对路径>
 | `dsh-sticky-notes:draft` | 还没按「记下」的草稿（记下后立即清掉） |
 | `dsh-sticky-notes:metrics:v1` | 本机埋点计数（导出 Markdown 时附在末尾） |
 
-内容和开合状态分开存，是为了让两个标签页同时开着时不会互相覆盖、来回回写。
-换浏览器或清站点数据会丢，重要内容请用 `⋯` → 「导出备份（JSON）」留一份可还原的备份。
+换浏览器或清站点数据会丢，重要内容请用 `⋯` →「导出备份（JSON）」留一份可还原的备份。
 注意 localStorage 按 origin 隔离：`127.0.0.1:43129` 和 `localhost:43129` 是两个 origin，便签不互通。
 
 ## 实现要点
@@ -182,10 +148,11 @@ dsh plugin --profile web add link:<本目录绝对路径>
 - 浏览器半侧 `lib/client.js` 是普通脚本：`window.__ModuleLoader__.load({ id, factory })`，
   由 `factory(require)` 返回 Cordis 插件模块 `{ name, inject, apply }`。
 - `apply` 里用 `ctx.slots.inject('shell.overlay', ...)` 注册一个覆盖在所有列之上的浮动层，
-  所以它不会改动 DSH 自己的布局和滚动容器。
-- 左列边界从 `[data-dsh-sidebar-root]` 量（ui-sidebar 的列容器），并用 `ResizeObserver`
-  跟随拖动 / 折叠更新；量不到就退回 0（贴最左边），不会比原来更糟。
-- `inject: ['slots', 'locale']` 让插件等 slots 与 locale 服务就绪后再 apply。
+  所以它不会改动 DSH 自己的布局和滚动容器；slot 送来的标准 kit props 会被原样转发给主组件
+  （「当前会话」就是从里面的 `useSessions` 读的）。
+- 卡片是 `memo(NoteCard)`：`t` / `timeLabels` / 回调都用 `useMemo` / `useCallback` 稳住引用，
+  否则浅比较永远失败、memo 形同虚设。
+- 拖动排序只记一个 ref、直接改 DOM class，**松手才提交一次顺序**，拖动过程零重渲染。
 - 组件外包了一层错误边界：便签栏自身渲染失败时只隐藏它，不影响 DSH 界面。
 - 更多 DSH 插件机制的细节见仓库的 [docs/plugin-authoring.md](../../docs/plugin-authoring.md)。
 
@@ -194,28 +161,23 @@ dsh plugin --profile web add link:<本目录绝对路径>
 只在 **DSH `0.2.1-rc.2`**（桌面端 0.12.1）实测通过。`package.json` 里的
 `dsh.compatibility.dshReleases` 只声明实测过的版本；换版本请先跑 `npm test`。
 
-## 长列表不卡（0.1.5）
-
-列表上限 500 条。卡片是 `memo(NoteCard)`，父组件传下去的 `note` / `t` / `timeLabels` / 回调
-引用都保持稳定，所以打字时**只有正在编辑的那 1 张卡片重渲染**。
-
-| 便签数 | 一次重渲染构造的元素 | 耗时（Node 内测得） |
-|---|---|---|
-| 100 | 2053 → 50 | 0.56ms → 0.10ms |
-| 300 | 6053 → 50 | 1.62ms → 0.21ms |
-| 500 | 10053 → 50 | 3.42ms → 0.35ms |
-
-数字由 `npm run perf` 产出，可传参对比任意两个版本；这里量的是 JSX 构造成本，
-不含浏览器 DOM diff，所以是下限收益而不是绝对耗时。
-
 ## 开发
 
 ```bash
-npm test        # smoke（加载与注册）+ behavior（迷你 React 驱动真实交互）
+npm test         # smoke（加载与注册）+ behavior（迷你 React 驱动真实交互）
 npm run contrast # 用真实主题 token 算 WCAG 对比度（缺主题包会 SKIP）
-npm run perf    # 长列表重渲染成本（300 条）：node test/perf.mjs <条数> <轮数> [客户端文件]
-npm run preview # 用真实组件输出生成静态预览页到 test/out/
+npm run perf     # 长列表重渲染成本：node test/perf.mjs <条数> <轮数> [客户端文件]
+npm run preview  # 用真实组件输出生成静态预览页到 test/out/
 ```
+
+四层测试都在 `node scripts/check.mjs` 里（CI 与本地同一套）：
+
+| 测试 | 守什么 |
+|---|---|
+| `test/smoke.mjs` | 脚本能解析、能注册到 `shell.overlay`、首屏不抛 |
+| `test/behavior.mjs` | 迷你 React（真 useState / 依赖缓存 / memo / 虚拟时钟）驱动真实交互：编辑不重排、输入法、落盘失败、搜索高亮、备份 round-trip、会话绑定、草稿、复制、拖动排序 |
+| `test/contrast.mjs` | 从真实主题包解析 token，按 WCAG 算配色对比度 |
+| `test/perf.mjs` | 整树渲染的元素数与耗时（可传客户端文件路径对比两个版本） |
 
 零运行时依赖，不需要构建步骤：`lib/client.js` 就是发布产物。
 
@@ -225,10 +187,12 @@ npm run preview # 用真实组件输出生成静态预览页到 test/out/
 
 ## English summary
 
-A sticky-notes side panel for the DSH (DeepSeek Harness) web UI. It docks at the right
-edge of the session-list column (never covering it), supports quick capture, inline
-editing, colors, pinning, search, archiving and a 5-second undo, and stores everything in
-the local browser only. i18n via `ctx.locale` (zh/en), icons from DSH primitives.
+A sticky-notes side panel for the DSH (DeepSeek Harness) web UI. It docks at the right edge of the
+session-list column (never covering it) and supports quick capture with a crash-proof draft, inline
+editing, colors, pinning, drag-to-reorder (keyboard equivalent), search across all notes with match
+highlighting, a per-session view, JSON backup/restore, a 5-second undo, and copy-to-clipboard.
+Everything stays in the local browser — no Host, no network. i18n via `ctx.locale` (zh/en), icons from
+DSH primitives, WCAG AA contrast verified by a test that reads the real theme tokens.
 No build step, no runtime dependencies.
 
 ## License
