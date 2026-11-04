@@ -46,6 +46,9 @@ let timers = new Map()
 let timerSeq = 0
 let focusedElement = null
 let lastBlob = null
+// 剪贴板：测试里捕获写进去的文本，也能模拟被拒绝。
+let clipboardText = null
+let clipboardFail = false
 // 组件收到的 props：真环境里是 slot 的标准 kit（含 useSessions），测试里可以模拟。
 let runtimeProps = {}
 // 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
@@ -188,6 +191,9 @@ const sandbox = {
         if (storageFull && key === 'dsh-sticky-notes:v1') throw new Error('QuotaExceededError')
         storage.set(key, String(value))
       },
+      removeItem: (key) => {
+        storage.delete(key)
+      },
     },
     innerWidth: 1400,
     setInterval: () => 0,
@@ -221,6 +227,15 @@ const sandbox = {
     text() {
       return Promise.resolve(this.parts.join(''))
     }
+  },
+  navigator: {
+    clipboard: {
+      writeText(text) {
+        if (clipboardFail) return Promise.reject(new Error('denied'))
+        clipboardText = String(text)
+        return Promise.resolve()
+      },
+    },
   },
   URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
 }
@@ -664,6 +679,37 @@ check('全部视图包含老便签与两个会话的便签', cardTexts().slice()
 remount([legacyNote])
 check('没有 kit 时只有 2 个标签', filterChips().length, 2)
 
+// ---------------------------------------------------------------- 草稿与复制
+
+function copyButton() {
+  return elements.find((el) => el.type === 'button' && String(el.props.className || '').indexOf('dsn-copy') !== -1)
+}
+
+// 草稿要活过「刷新」：没按「记下」的半句话也不能丢。
+storage.delete('dsh-sticky-notes:draft')
+remount([])
+act(() => draftArea().props.onChange({ target: { value: '还没写完的半句话' } }))
+check('草稿写进本地存储', storage.get('dsh-sticky-notes:draft'), '还没写完的半句话')
+remount([]) // 相当于刷新页面：组件重新挂载
+check('刷新后草稿还在', draftArea().props.value, '还没写完的半句话')
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+advance(300)
+check('记下之后草稿被清掉', storage.has('dsh-sticky-notes:draft'), false)
+
+// 一键复制：成功给提示，失败如实报错
+const copySeed = [{ id: 'cp', text: '要被复制的一句话', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 }]
+remount(copySeed)
+clipboardText = null
+await actAsync(() => copyButton().props.onClick({}))
+check('复制把正文写进剪贴板', clipboardText, '要被复制的一句话')
+check('复制成功给提示', toastEl() && toastEl().props.children[0].props.children, '已复制这条便签')
+
+clipboardFail = true
+await actAsync(() => copyButton().props.onClick({}))
+check('复制失败如实报错', toastEl() && toastEl().props.children[0].props.children, '复制失败，请手动选择文本')
+check('失败提示带 is-error', toastEl() && toastEl().props.className, 'dsn-toast is-error')
+clipboardFail = false
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -672,5 +718,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定',
+  'PASS  行为测试：编辑不重排 / 失焦才置顶 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定 / 草稿不丢 / 一键复制',
 )

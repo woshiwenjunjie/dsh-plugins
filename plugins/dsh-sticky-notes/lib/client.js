@@ -56,6 +56,7 @@
       // 开合状态只属于当前页，混在一个 key 里会让两个标签页互相覆盖、来回写。
       var STORAGE_KEY = 'dsh-sticky-notes:v1'
       var OPEN_KEY = 'dsh-sticky-notes:open'
+      var DRAFT_KEY = 'dsh-sticky-notes:draft'
       var SAVE_DEBOUNCE_MS = 300
       var MAX_NOTES = 500
       // 便签到这个数量再显示搜索框，少的时候不占地方。
@@ -130,6 +131,25 @@
           window.localStorage.setItem(OPEN_KEY, open ? '1' : '0')
         } catch (error) {
           // 开合状态存不下不影响便签本身，忽略。
+        }
+      }
+
+      // 还没按「记下」的草稿也存一份：刷新、重装插件、手滑关页面都不该丢半句话。
+      function readDraft() {
+        try {
+          var text = window.localStorage.getItem(DRAFT_KEY)
+          return typeof text === 'string' ? text : ''
+        } catch (error) {
+          return ''
+        }
+      }
+
+      function writeDraft(text) {
+        try {
+          if (!text) window.localStorage.removeItem(DRAFT_KEY)
+          else window.localStorage.setItem(DRAFT_KEY, text)
+        } catch (error) {
+          // 草稿存不下不影响主流程（便签本身已经有自己的落盘通道）。
         }
       }
 
@@ -305,6 +325,8 @@
         'toast.imported': '已导入',
         'toast.updated': '更新',
         'toast.backedUp': '备份已导出',
+        'toast.copied': '已复制这条便签',
+        'toast.copyFailed': '复制失败，请手动选择文本',
         'toast.importFailed': '不是本插件的备份文件',
         'toast.importEmpty': '备份文件里没有便签',
         close: '收起便签栏',
@@ -327,6 +349,7 @@
         'note.placeholder': '空的便签…',
         'note.aria': '便签内容',
         'note.edit': '点一下编辑',
+        'note.copy': '复制这条便签',
         'note.pinned': '置顶',
         'note.pin': '置顶这条便签',
         'note.unpin': '取消置顶',
@@ -370,6 +393,8 @@
         'toast.imported': 'Imported',
         'toast.updated': 'updated',
         'toast.backedUp': 'Backup exported',
+        'toast.copied': 'Note copied',
+        'toast.copyFailed': "Couldn't copy — select the text manually",
         'toast.importFailed': "This isn't a notes backup file",
         'toast.importEmpty': 'That backup has no notes',
         close: 'Collapse notes',
@@ -392,6 +417,7 @@
         'note.placeholder': 'Empty note…',
         'note.aria': 'Note content',
         'note.edit': 'Click to edit',
+        'note.copy': 'Copy this note',
         'note.pinned': 'Pinned',
         'note.pin': 'Pin this note',
         'note.unpin': 'Unpin this note',
@@ -591,6 +617,19 @@
         }, size)
       }
 
+      // 一键复制：把这条便签原样放进系统剪贴板（常用来贴到别处或对话输入框）。
+      function IconCopy(size) {
+        return pick('IconCopyOutlineRegular', function (s) {
+          return svg(
+            [
+              h('path', { key: 'a', d: 'M9 9h9.5v11.5H9z' }),
+              h('path', { key: 'b', d: 'M15 9V5.5H5.5V17H9' }),
+            ],
+            s,
+          )
+        }, size)
+      }
+
       function IconDownload(size) {
         return pick('IconDownloadOutlineRegular', function (s) {
           return svg(
@@ -780,6 +819,7 @@
         var onChange = props.onChange
         var onCommit = props.onCommit
         var onRemove = props.onRemove
+        var onCopy = props.onCopy
         var onCycleColor = props.onCycleColor
         var onTogglePin = props.onTogglePin
         var onArchive = props.onArchive
@@ -889,6 +929,20 @@
               },
               archived ? IconUnarchive(15) : IconArchive(15),
             ),
+            // 复制：平时隐起来，hover / 键盘聚焦到这张卡片时才浮现，静态列表不加视觉噪声。
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsn-icon-btn dsn-copy',
+                title: t('note.copy'),
+                'aria-label': t('note.copy'),
+                onClick: function () {
+                  if (typeof onCopy === 'function') onCopy(note.id)
+                },
+              },
+              IconCopy(14),
+            ),
             h(
               'button',
               {
@@ -918,7 +972,7 @@
         // 当前会话：来自 slot 的标准 kit；拿不到就是 null（不出现「本会话」视图）。
         var activeSessionId = useActiveSessionId(props)
         var [store, setStore] = useState(readStore)
-        var [draft, setDraft] = useState('')
+        var [draft, setDraft] = useState(readDraft)
         var [tick, setTick] = useState(Date.now())
         var [dirty, setDirty] = useState(false)
         // 上一次落盘是否失败（存储满、被禁用）：失败时不能继续显示「已保存」。
@@ -1115,6 +1169,14 @@
             writeOpen(open)
           },
           [open],
+        )
+
+        // 草稿实时落盘：刷新、重装插件、手滑关页面都不丢还没按「记下」的半句话。
+        useEffect(
+          function () {
+            writeDraft(draft)
+          },
+          [draft],
         )
 
         // 立刻落盘：刷新、关页面、插件卸载时不能丢最后几个字。
@@ -1474,6 +1536,33 @@
           showToast({ kind: 'delete', note: target }, UNDO_MS)
           recordMetric('delete')
         }, [])
+
+        // 一键复制：走系统剪贴板；拿不到就明确说失败，让用户手动选文本（不假装成功）。
+        var copyNote = useCallback(function (id) {
+          var target = findIn(latestStore.current.notes, id)
+          if (!target) return
+          var text = String(target.text == null ? '' : target.text)
+          var done = function (ok) {
+            showToast(
+              ok ? { kind: 'info', text: t('toast.copied') } : { kind: 'error', text: t('toast.copyFailed') },
+              ok ? 2400 : 3200,
+            )
+          }
+          try {
+            var clipboard = typeof navigator !== 'undefined' && navigator ? navigator.clipboard : null
+            if (clipboard && typeof clipboard.writeText === 'function') {
+              Promise.resolve(clipboard.writeText(text)).then(function () {
+                done(true)
+              }, function () {
+                done(false)
+              })
+              return
+            }
+          } catch (error) {
+            // 落到下面的失败提示
+          }
+          done(false)
+        }, [t])
 
         function undoAction() {
           var pending = undoState
@@ -1841,6 +1930,7 @@
                     onChange: updateNote,
                     onCommit: commitNote,
                     onRemove: removeNote,
+                    onCopy: copyNote,
                     onCycleColor: cycleColor,
                     onTogglePin: togglePin,
                     onArchive: archiveNote,
@@ -1936,6 +2026,9 @@
         '.dsn-icon-btn{display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:9px;background:transparent;color:var(--dsn-fg-2);cursor:pointer;font:inherit;transition:background .12s ease,color .12s ease}',
         '.dsn-icon-btn:hover:not(:disabled){background:rgba(127,127,127,.16);color:var(--dsn-fg)}',
         '.dsn-icon-btn:disabled{opacity:.38;cursor:default}',
+        // 复制按钮平时隐形，鼠标进卡片或键盘聚焦时才浮现：静态列表不加视觉噪声。
+        '.dsn-copy{opacity:0;transition:opacity .12s ease}',
+        '.dsn-note:hover .dsn-copy,.dsn-note:focus-within .dsn-copy,.dsn-copy:focus-visible{opacity:1}',
         '.dsn-icon-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
         '.dsn-del.is-confirming{color:var(--dsw-alias-state-error-primary,#e5484d);background:rgba(229,72,77,.14)}',
         '.dsn-composer{padding:0 14px 10px;display:flex;flex-direction:column;gap:8px}',
