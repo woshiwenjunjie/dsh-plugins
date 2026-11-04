@@ -54,6 +54,19 @@ let runtimeProps = {}
 // 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
 let passCardRenders = 0
 let maxPassCardRenders = 0
+// 挂在 window 上的 keydown 监听也要能真触发：Alt+Shift+N / Esc / Ctrl+K 都走这条路。
+const windowListeners = new Map()
+function addWindowListener(type, fn) {
+  const list = windowListeners.get(type) || []
+  list.push(fn)
+  windowListeners.set(type, list)
+}
+function removeWindowListener(type, fn) {
+  const list = windowListeners.get(type)
+  if (!list) return
+  const index = list.indexOf(fn)
+  if (index !== -1) list.splice(index, 1)
+}
 
 function createElement(type, rawProps, ...children) {
   const props = Object.assign({}, rawProps || {})
@@ -75,12 +88,17 @@ function createElement(type, rawProps, ...children) {
     getBoundingClientRect: () => ({ top: 0, height: 100, bottom: 100, left: 0, right: 200, width: 200 }),
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
   }
-  // 和 React 一样：DOM 元素的 ref 指向元素本身；给个 focus 用来验证焦点归还。
+  // 和 React 一样：ref 可以是对像也可以是函数；给个 focus 用来验证焦点去向。
   if (props.ref && typeof props.ref === 'object') {
     props.ref.current = element
     element.focus = () => {
       focusedElement = element
     }
+  } else if (typeof props.ref === 'function') {
+    element.focus = () => {
+      focusedElement = element
+    }
+    props.ref(element)
   }
   elements.push(element)
   return element
@@ -217,8 +235,8 @@ const sandbox = {
     clearTimeout: (id) => {
       timers.delete(id)
     },
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: addWindowListener,
+    removeEventListener: removeWindowListener,
   },
   document: {
     head: { appendChild() {} },
@@ -334,6 +352,13 @@ function advance(ms) {
 function act(mutate) {
   maxPassCardRenders = 0
   mutate()
+  flush()
+}
+
+/** 派发一次全局 keydown：走组件真正注册在 window 上的监听，而不是直接调组件内部函数。 */
+function pressKey(patch) {
+  const event = Object.assign({ preventDefault() {}, stopPropagation() {} }, patch)
+  for (const listener of (windowListeners.get('keydown') || []).slice()) listener(event)
   flush()
 }
 
@@ -477,6 +502,8 @@ function remount(nextNotes, props) {
   refSlots = []
   effectSlots = []
   timers.clear()
+  // 卸载会移除组件挂在 window 上的监听；重挂载相当于重新开始，旧的不能留。
+  windowListeners.clear()
   cursor = 0
   elements = []
   focusedElement = null
@@ -546,6 +573,25 @@ focusedElement = null
 act(() => closeButton().props.onClick({}))
 check('收起后不再渲染面板', elements.some((el) => el.props.className === 'dsn-panel'), false)
 check('收起后焦点回到左边缘标签', focusedElement && focusedElement.props.className, 'dsn-tab')
+
+// 零级进入：展开后光标应该已经在草稿框里（用户不用再点一次输入框）。
+function tabButton() {
+  return elements.find((el) => el.type === 'button' && el.props.className === 'dsn-tab')
+}
+focusedElement = null
+act(() => tabButton().props.onClick({}))
+check('点贴边标签展开面板', elements.some((el) => el.props.className === 'dsn-panel'), true)
+check('展开后焦点就在草稿框', focusedElement, draftArea())
+
+// Alt+Shift+N 同理：唤起即写。快捷键走的是 window 上的监听，不是组件内部函数。
+act(() => closeButton().props.onClick({}))
+focusedElement = null
+pressKey({ altKey: true, shiftKey: true, key: 'N' })
+check('Alt+Shift+N 展开面板', elements.some((el) => el.props.className === 'dsn-panel'), true)
+check('Alt+Shift+N 展开后焦点就在草稿框', focusedElement, draftArea())
+pressKey({ altKey: true, shiftKey: true, key: 'n' })
+check('再按一次 Alt+Shift+N 收起', elements.some((el) => el.props.className === 'dsn-panel'), false)
+check('快捷键收起后焦点也回到贴边标签', focusedElement && focusedElement.props.className, 'dsn-tab')
 
 // ---------------------------------------------------------------- 备份与恢复
 
@@ -774,6 +820,47 @@ check('复制失败如实报错', toastEl() && toastEl().props.children[0].props
 check('失败提示带 is-error', toastEl() && toastEl().props.className, 'dsn-toast is-error')
 clipboardFail = false
 
+// ---------------------------------------------------------------- 收起时的角标
+//
+// 收起后只剩 32px 的贴边标签，所以「有草稿没记下」「有几条置顶」都得从这个标签上读出来；
+// 语义同时写进 title / aria-label，不依赖颜色。
+
+function tabDraftDot() {
+  return elements.find((el) => el.props.className === 'dsn-tab-draft')
+}
+function tabPinMark() {
+  return elements.find((el) => el.props.className === 'dsn-tab-pin')
+}
+function tabCount() {
+  return elements.find((el) => el.props.className === 'dsn-tab-count')
+}
+
+storage.delete('dsh-sticky-notes:draft')
+const badgeSeed = [
+  { id: 'b1', text: '被钉住的那条', color: 'amber', pinned: true, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'b2', text: '普通的那条', color: 'sky', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+]
+remount(badgeSeed)
+act(() => closeButton().props.onClick({}))
+check('收起后显示总数角标', tabCount() && tabCount().props.children, '2')
+check('有置顶时收起态显示置顶标记', Boolean(tabPinMark()), true)
+check('没有草稿时不出草稿点', tabDraftDot(), undefined)
+check('置顶条数写进贴边标签 title', String(tabButton().props.title).indexOf('1 置顶') !== -1, true)
+
+// 写了没记下 → 收起后留一个草稿点：不打开面板也知道有东西没存
+act(() => tabButton().props.onClick({}))
+act(() => draftArea().props.onChange({ target: { value: '写了一半还没记下' } }))
+act(() => closeButton().props.onClick({}))
+check('有草稿时收起态出现草稿点', Boolean(tabDraftDot()), true)
+check('草稿状态写进 aria-label', String(tabButton().props['aria-label']).indexOf('有草稿还没记下') !== -1, true)
+
+// 记下之后草稿点消失
+act(() => tabButton().props.onClick({}))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+advance(300)
+act(() => closeButton().props.onClick({}))
+check('记下后草稿点消失', tabDraftDot(), undefined)
+
 // ---------------------------------------------------------------- 手动排序
 
 function articles() {
@@ -851,5 +938,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
 )

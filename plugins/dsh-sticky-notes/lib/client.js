@@ -328,6 +328,7 @@
         name: '便签',
         'tab.title': '便签栏（Alt+Shift+N）',
         'tab.open': '打开便签栏',
+        'tab.draft': '有草稿还没记下',
         'sub.empty': '随手记',
         unit: '条',
         export: '导出为 Markdown',
@@ -401,6 +402,7 @@
         name: 'Notes',
         'tab.title': 'Notes (Alt+Shift+N)',
         'tab.open': 'Open notes',
+        'tab.draft': 'Draft not saved yet',
         'sub.empty': 'Jot something',
         unit: 'notes',
         export: 'Export as Markdown',
@@ -790,6 +792,14 @@
 
       function AutoTextarea(props) {
         var ref = useRef(null)
+        // 外部需要拿到这个 textarea（打开面板时要聚焦草稿框）：用函数 ref 顺手转发出去。
+        // 用函数 ref 而不是再挂一个 useEffect，是因为 commit 阶段就赋值好了，
+        // 父组件的 effect 里能立刻拿到节点，不依赖 effect 的先后顺序。
+        var bindRef = function (node) {
+          ref.current = node
+          var external = props.inputRef
+          if (external && typeof external === 'object') external.current = node
+        }
         useEffect(
           function () {
             var el = ref.current
@@ -799,7 +809,9 @@
           },
           [props.value],
         )
-        return h('textarea', Object.assign({}, props, { ref: ref }))
+        var rest = Object.assign({}, props)
+        delete rest.inputRef
+        return h('textarea', Object.assign(rest, { ref: bindRef }))
       }
 
       // ------------------------------------------------------------ 当前会话
@@ -1228,6 +1240,8 @@
         var undoTimer = useRef(0)
         var panelRef = useRef(null)
         var tabRef = useRef(null)
+        // 草稿输入框：打开面板时把焦点放进去（「唤起即写」），不用 DOM 查询。
+        var draftRef = useRef(null)
         var menuRef = useRef(null)
         var menuBtnRef = useRef(null)
         var fileRef = useRef(null)
@@ -1578,7 +1592,8 @@
           }
         }, [toggle])
 
-        // 打开时把焦点放到输入框；首帧不抢焦点（页面加载时可能正有别的输入框在用）。
+        // 打开时把焦点放到输入框（点标签、按 Alt+Shift+N、Esc 之后重开都算）：
+        // 「唤起即写」，用户不用再点一次输入框。首帧不抢焦点——页面加载时可能正有别的输入框在用。
         var firstRender = useRef(true)
         useEffect(
           function () {
@@ -1587,9 +1602,7 @@
               return
             }
             if (!open) return
-            var panel = panelRef.current
-            if (!panel) return
-            var input = panel.querySelector('.dsn-draft')
+            var input = draftRef.current
             if (input && typeof input.focus === 'function') input.focus()
           },
           [open],
@@ -1971,20 +1984,34 @@
         var visibleCount = activeNotes.filter(function (note) {
           return note.text.trim().length > 0
         }).length
+        // 收起后便签栏只剩一个贴边标签，所以「有东西还没处理」要能从这个标签上读出来：
+        // 草稿没记下、以及有几条置顶。都在 title / aria-label 里说出来，不只靠颜色。
+        var pinnedCount = activeNotes.filter(function (note) {
+          return note.pinned && note.text.trim().length > 0
+        }).length
+        var hasDraft = draft.trim().length > 0
+        var tabStatus = []
+        if (hasDraft) tabStatus.push(t('tab.draft'))
+        if (pinnedCount > 0) tabStatus.push(pinnedCount + ' ' + t('note.pinned'))
 
         var tab = h(
           'button',
           {
             type: 'button',
             className: 'dsn-tab',
-            title: t('tab.title'),
-            'aria-label': t('tab.open'),
+            title: tabStatus.length ? t('tab.title') + ' · ' + tabStatus.join(' · ') : t('tab.title'),
+            'aria-label': tabStatus.length ? t('tab.open') + '，' + tabStatus.join('，') : t('tab.open'),
             'aria-expanded': open ? 'true' : 'false',
             ref: tabRef,
             onClick: toggle,
           },
+          // 草稿点贴右上角，不占布局：便签栏只有 32px 宽，多一行会显得臃肿。
+          hasDraft ? h('span', { className: 'dsn-tab-draft', 'aria-hidden': 'true' }) : null,
           h('span', { className: 'dsn-tab-icon' }, IconNote(15)),
           h('span', { className: 'dsn-tab-text' }, t('name')),
+          pinnedCount > 0
+            ? h('span', { className: 'dsn-tab-pin', 'aria-hidden': 'true' }, IconPin(11))
+            : null,
           visibleCount > 0 ? h('span', { className: 'dsn-tab-count' }, visibleCount > 99 ? '99+' : String(visibleCount)) : null,
         )
 
@@ -2091,6 +2118,7 @@
             'div',
             { className: 'dsn-composer' },
             h(AutoTextarea, {
+              inputRef: draftRef,
               className: 'dsn-input dsn-draft',
               value: draft,
               rows: 3,
@@ -2332,6 +2360,10 @@
         '.dsn-tab-icon{display:grid;place-items:center;opacity:.9}',
         '.dsn-tab-text{writing-mode:vertical-rl;letter-spacing:.22em;font-size:11px;line-height:1;opacity:.9}',
         '.dsn-tab-count{display:grid;place-items:center;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--dsn-accent);color:var(--dsn-on-accent);font-size:10px;font-weight:650;line-height:1;font-variant-numeric:tabular-nums}',
+        // 收起态的两个小提示：草稿点（右上角，不占布局）+ 置顶小图标（在流里，表示「有东西被钉着」）。
+        // 两者纯装饰，语义都在贴边标签的 title / aria-label 里，所以不参与对比度门禁。
+        '.dsn-tab-draft{position:absolute;top:7px;right:6px;width:8px;height:8px;border-radius:50%;background:var(--dsn-accent);box-shadow:0 0 0 2px var(--dsn-surface)}',
+        '.dsn-tab-pin{display:grid;place-items:center;opacity:.75}',
         '.dsn-panel{position:absolute;left:var(--dsn-left);top:0;bottom:0;width:min(300px,calc(100vw - var(--dsn-left) - 24px));pointer-events:auto;display:flex;flex-direction:column;min-height:0;background:var(--dsn-surface);border-right:1px solid var(--dsn-line);box-shadow:10px 0 34px rgba(0,0,0,.18);animation:dsn-slide .12s ease-out}',
         '@keyframes dsn-slide{from{transform:translateX(-12px);opacity:.4}to{transform:none;opacity:1}}',
         '.dsn-head{display:flex;align-items:center;gap:10px;padding:14px 10px 10px 16px}',
