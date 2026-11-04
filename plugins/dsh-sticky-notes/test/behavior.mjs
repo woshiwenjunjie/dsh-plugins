@@ -925,6 +925,134 @@ advance(300)
 act(() => closeButton().props.onClick({}))
 check('记下后草稿点消失', tabDraftDot(), undefined)
 
+// ---------------------------------------------------------------- 回顾条
+//
+// 打开面板时在列表上方浮一条「旧便签」：一行高、点开才展开、`×` 关掉今天不再出现。
+// 挑选规则：非归档、非置顶、有正文、至少两小时没动过，且不在这三条最新里。
+
+const REVIEW_KEY = 'dsh-sticky-notes:review'
+function reviewBar() {
+  return elements.find((el) => {
+    const cls = String(el.props.className || '')
+    return cls === 'dsn-review' || cls === 'dsn-review is-expanded'
+  })
+}
+function reviewMain() {
+  return elements.find((el) => String(el.props.className || '') === 'dsn-review-main')
+}
+function reviewClose() {
+  return elements.find((el) => String(el.props.className || '') === 'dsn-icon-btn dsn-review-close')
+}
+function reviewShownText() {
+  const main = reviewMain()
+  if (!main) return null
+  const text = main.props.children[1]
+  return text && flattenText(text)
+}
+function localDay(ms) {
+  const date = new Date(ms)
+  const month = date.getMonth() + 1
+  const day = date.getDate()
+  return `${date.getFullYear()}-${month < 10 ? '0' + month : month}-${day < 10 ? '0' + day : day}`
+}
+
+const reviewSeed = [
+  { id: 'rv-fresh1', text: '刚写的一条', color: 'amber', createdAt: now - 60000, updatedAt: now - 60000 },
+  { id: 'rv-fresh2', text: '十分钟前写的', color: 'sky', createdAt: now - 10 * 60000, updatedAt: now - 10 * 60000 },
+  { id: 'rv-fresh3', text: '半小时前写的', color: 'mint', createdAt: now - 30 * 60000, updatedAt: now - 30 * 60000 },
+  { id: 'rv-old', text: '旧的一条（三小时前）', color: 'rose', createdAt: now - 3 * 3600 * 1000, updatedAt: now - 3 * 3600 * 1000 },
+  {
+    id: 'rv-old2',
+    text: '更旧的一条（两天前）',
+    color: 'violet',
+    createdAt: now - 2 * 24 * 3600 * 1000,
+    updatedAt: now - 2 * 24 * 3600 * 1000,
+  },
+  {
+    id: 'rv-pinned',
+    text: '置顶的老便签不该被回顾',
+    color: 'amber',
+    pinned: true,
+    order: -10,
+    createdAt: now - 5 * 3600 * 1000,
+    updatedAt: now - 5 * 3600 * 1000,
+  },
+  {
+    id: 'rv-archived',
+    text: '归档的老便签不该被回顾',
+    color: 'sky',
+    archived: true,
+    archivedAt: now - 6 * 3600 * 1000,
+    createdAt: now - 6 * 3600 * 1000,
+    updatedAt: now - 6 * 3600 * 1000,
+  },
+]
+
+storage.delete(REVIEW_KEY)
+remount(reviewSeed)
+check('有旧便签时打开面板出现回顾条', Boolean(reviewBar()), true)
+check('回顾条有标签', flattenText(reviewMain().props.children[0]), '翻到一条')
+check(
+  '回顾条只挑旧的那两条之一',
+  ['旧的一条（三小时前）', '更旧的一条（两天前）'].indexOf(reviewShownText()) !== -1,
+  true,
+)
+check('刚写的不参与回顾', reviewShownText() === '刚写的一条' || reviewShownText() === '十分钟前写的', false)
+check(
+  '置顶 / 归档的不参与回顾',
+  reviewShownText() === '置顶的老便签不该被回顾' || reviewShownText() === '归档的老便签不该被回顾',
+  false,
+)
+check(
+  '回顾条在列表上方',
+  elements.indexOf(reviewBar()) < elements.indexOf(elements.find((el) => String(el.props.className || '').indexOf('dsn-list') === 0)),
+  true,
+)
+
+// 默认一行高：没有展开态就没有 is-expanded（正文靠 CSS 省略号截断，不抢首屏）
+check('回顾条默认不展开', reviewBar().props.className, 'dsn-review')
+act(() => reviewMain().props.onClick({}))
+check('点一下展开全文', reviewBar().props.className, 'dsn-review is-expanded')
+check('展开态写进 aria-expanded', reviewMain().props['aria-expanded'], 'true')
+act(() => reviewMain().props.onClick({}))
+check('再点一下收起', reviewBar().props.className, 'dsn-review')
+
+// 关闭：今天不再显示
+act(() => reviewClose().props.onClick({}))
+check('关掉后回顾条消失', Boolean(reviewBar()), false)
+check('关闭状态落盘', JSON.parse(storage.get(REVIEW_KEY)).hidden, true)
+remount(reviewSeed)
+check('同一天再打开也不出现', Boolean(reviewBar()), false)
+
+// 换一天：重新挑一条
+storage.set(REVIEW_KEY, JSON.stringify({ day: '2000-01-01', id: '', hidden: false }))
+remount(reviewSeed)
+check('跨天后重新出现', Boolean(reviewBar()), true)
+
+// 当天已经挑过就不换人：否则打字触发重渲染时会一直换，变成噪音
+storage.set(REVIEW_KEY, JSON.stringify({ day: localDay(Date.now()), id: 'rv-old2', hidden: false }))
+remount(reviewSeed)
+check('当天已挑过就固定那一条', reviewShownText(), '更旧的一条（两天前）')
+
+// 挑中的便签被删了：回顾条自己消失，不留空壳
+storage.set(REVIEW_KEY, JSON.stringify({ day: localDay(Date.now()), id: 'rv-deleted', hidden: false }))
+remount(reviewSeed)
+check('挑中的便签没了就不显示', Boolean(reviewBar()), false)
+
+// 没有旧便签（全是一小时内写的）时不该硬凑一条
+storage.delete(REVIEW_KEY)
+remount(reviewSeed.slice(0, 3))
+check('没有旧便签时不显示', Boolean(reviewBar()), false)
+
+// 搜索时让位：那时列表本身才是焦点
+storage.set(REVIEW_KEY, JSON.stringify({ day: localDay(Date.now()), id: 'rv-old', hidden: false }))
+remount(reviewSeed)
+check('搜索前回顾条在', Boolean(reviewBar()), true)
+act(() => searchInput().props.onChange({ target: { value: '旧' } }))
+check('搜索时回顾条隐藏', Boolean(reviewBar()), false)
+act(() => searchInput().props.onChange({ target: { value: '' } }))
+check('清空搜索后回顾条回来', Boolean(reviewBar()), true)
+
 // ---------------------------------------------------------------- 手动排序
 
 function articles() {
@@ -1002,5 +1130,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
 )

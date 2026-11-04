@@ -9,7 +9,7 @@
 
 | 插件 | 说明 | 版本 | 文档 |
 |---|---|---|---|
-| **dsh-sticky-notes** | 左侧便签栏：随手记录（草稿不丢）、置顶、搜索（含归档、命中高亮、**`#标签` 筛选**）、一键复制、按会话查看、**来源标签可跳回原会话**、拖拽排序、备份与恢复、5 秒撤销；**收起态提示草稿/置顶**；数据只存本机 | `0.1.15` | [README](plugins/dsh-sticky-notes/README.md) · [CHANGELOG](plugins/dsh-sticky-notes/CHANGELOG.md) |
+| **dsh-sticky-notes** | 左侧便签栏：随手记录（草稿不丢）、置顶、搜索（含归档、命中高亮、**`#标签` 筛选**）、一键复制、按会话查看、**来源标签可跳回原会话**、拖拽排序、备份与恢复、5 秒撤销；**收起态提示草稿/置顶**、**打开面板浮一条旧便签回看**；数据只存本机 | `0.1.16` | [README](plugins/dsh-sticky-notes/README.md) · [CHANGELOG](plugins/dsh-sticky-notes/CHANGELOG.md) |
 
 ![dsh-sticky-notes](plugins/dsh-sticky-notes/docs/light.png)
 
@@ -49,6 +49,7 @@ dsh plugin --profile web add link:<仓库绝对路径>/plugins/dsh-sticky-notes
 | 0.1.13 | 来源会话标签：别的会话里写的便签可点回原会话（调研 P0 落地） |
 | 0.1.14 | 收起态角标：有草稿没记下 / 有几条置顶；唤起即聚焦输入框（补测试） |
 | 0.1.15 | 标签搜索：正文写 `#标签`，搜索框敲 `#标签` 就筛（前缀匹配 + 关键词 AND，无新数据模型） |
+| 0.1.16 | 回顾条：打开面板浮一条旧便签（≥2 小时没动过），一行高、可展开、关掉今天不再显示 |
 
 ## 目录结构
 

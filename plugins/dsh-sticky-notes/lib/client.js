@@ -63,6 +63,11 @@
       var STORAGE_KEY = 'dsh-sticky-notes:v1'
       var OPEN_KEY = 'dsh-sticky-notes:open'
       var DRAFT_KEY = 'dsh-sticky-notes:draft'
+      // 回顾条：每天挑一条「旧」便签看一眼。只存「今天挑了谁、关没关」，不进便签数据。
+      var REVIEW_KEY = 'dsh-sticky-notes:review'
+      // 至少两小时没动过才算「旧」；最近三条不参与（刚写过的不需要被回顾）。
+      var REVIEW_MIN_IDLE = 2 * 60 * 60 * 1000
+      var REVIEW_FRESH_SKIP = 3
       var SAVE_DEBOUNCE_MS = 300
       var MAX_NOTES = 500
       // 便签到这个数量再显示搜索框，少的时候不占地方。
@@ -162,6 +167,67 @@
         } catch (error) {
           // 草稿存不下不影响主流程（便签本身已经有自己的落盘通道）。
         }
+      }
+
+      // ------------------------------------------------------------ 回顾条
+      //
+      // 「每天看一眼旧便签」的极简版：不推送、不弹窗，只在打开面板时浮一条。
+      // 挑选规则故意保守——非归档、非置顶、有正文、至少两小时没动过，且不在这三条最新里；
+      // 同一天只挑一次（打字时不会来回换），关掉就今天不再出现。
+
+      function dayKey(ms) {
+        var date = new Date(ms)
+        var month = date.getMonth() + 1
+        var day = date.getDate()
+        return date.getFullYear() + '-' + (month < 10 ? '0' + month : month) + '-' + (day < 10 ? '0' + day : day)
+      }
+
+      function readReview() {
+        try {
+          var raw = window.localStorage.getItem(REVIEW_KEY)
+          var parsed = raw ? JSON.parse(raw) : null
+          if (!parsed || typeof parsed !== 'object') return null
+          return {
+            day: typeof parsed.day === 'string' ? parsed.day : '',
+            id: typeof parsed.id === 'string' ? parsed.id : '',
+            hidden: parsed.hidden === true,
+          }
+        } catch (error) {
+          return null
+        }
+      }
+
+      function writeReview(review) {
+        try {
+          window.localStorage.setItem(REVIEW_KEY, JSON.stringify(review))
+        } catch (error) {
+          // 存不下只影响「今天不再显示」，不影响便签本身，忽略。
+        }
+      }
+
+      function pickReviewNote(notes, lastId) {
+        var ordered = sortNotes(notes)
+        var skip = {}
+        for (var i = 0; i < ordered.length && i < REVIEW_FRESH_SKIP; i += 1) skip[ordered[i].id] = true
+        var cutoff = Date.now() - REVIEW_MIN_IDLE
+        var pool = []
+        for (var j = 0; j < ordered.length; j += 1) {
+          var note = ordered[j]
+          if (note.archived === true || note.pinned === true) continue
+          if (skip[note.id]) continue
+          if (!String(note.text == null ? '' : note.text).trim()) continue
+          if (note.updatedAt > cutoff) continue
+          pool.push(note)
+        }
+        if (!pool.length) return null
+        var candidates = pool
+        if (lastId) {
+          var others = pool.filter(function (note) {
+            return note.id !== lastId
+          })
+          if (others.length) candidates = others
+        }
+        return candidates[Math.floor(Math.random() * candidates.length)]
       }
 
       function sortNotes(notes) {
@@ -352,6 +418,10 @@
         'save.failed': '保存失败，请先导出',
         save: '记下',
         'search.placeholder': '搜索便签…（Ctrl+K；#标签 可按标签筛）',
+        'review.label': '翻到一条',
+        'review.expand': '展开这条旧便签',
+        'review.collapse': '收起这条旧便签',
+        'review.dismiss': '今天不再显示',
         'search.aria': '搜索便签',
         'search.clear': '清除搜索',
         'empty.none': '还没有便签',
@@ -426,6 +496,10 @@
         'save.failed': "Couldn't save — export first",
         save: 'Save',
         'search.placeholder': 'Search notes… (Ctrl+K, #tags work)',
+        'review.label': 'From earlier',
+        'review.expand': 'Expand this older note',
+        'review.collapse': 'Collapse this note',
+        'review.dismiss': "Don't show again today",
         'search.aria': 'Search notes',
         'search.clear': 'Clear search',
         'empty.none': 'No notes yet',
@@ -1326,6 +1400,9 @@
         var [undoState, setUndoState] = useState(null)
         // 备份菜单（低频操作收进「更多」，头部按钮数量不变）。
         var [menuOpen, setMenuOpen] = useState(false)
+        // 回顾条：今天挑中的那条旧便签 { day, id, hidden } 与它的展开态。
+        var [review, setReview] = useState(readReview)
+        var [reviewExpanded, setReviewExpanded] = useState(false)
         // 左列右边界：便签栏贴着它展开，不压住会话列表。
         var [leftInset, setLeftInset] = useState(measureSidebarLeft)
         var saveTimer = useRef(0)
@@ -1455,6 +1532,30 @@
           [baseList, search, notes],
         )
         var searchable = notes.length >= SEARCH_THRESHOLD
+
+        // 回顾条只在「今天挑的那条、还没关、还在、不是归档」时出现；
+        // 搜索态与归档视图里让位——那时列表本身才是焦点。
+        var reviewNote = useMemo(
+          function () {
+            if (!review || !review.id || review.hidden) return null
+            if (review.day !== dayKey(Date.now())) return null
+            var note = findIn(notes, review.id)
+            if (!note || note.archived === true) return null
+            return note
+          },
+          [review, notes],
+        )
+        var showReview = Boolean(reviewNote) && !search.active && view === 'all'
+
+        var dismissReview = useCallback(function () {
+          setReview(function (prev) {
+            if (!prev || !prev.id) return prev
+            var next = { day: prev.day, id: prev.id, hidden: true }
+            writeReview(next)
+            return next
+          })
+          setReviewExpanded(false)
+        }, [])
 
         // 左列宽度会变（拖动分隔条、折叠成 rail），跟着量。
         useEffect(
@@ -1699,6 +1800,24 @@
             if (input && typeof input.focus === 'function') input.focus()
           },
           [open],
+        )
+
+        // 回顾条：每次打开面板看一眼有没有今天的旧便签。同一天只挑一次，
+        // 否则打字（列表变化）时会一直换人，变成噪音。收起时把展开态复位。
+        useEffect(
+          function () {
+            if (!open) {
+              if (reviewExpanded) setReviewExpanded(false)
+              return
+            }
+            var today = dayKey(Date.now())
+            if (review && review.day === today) return
+            var pick = pickReviewNote(latestStore.current.notes, review && review.id)
+            var next = { day: today, id: pick ? pick.id : '', hidden: false }
+            writeReview(next)
+            setReview(next)
+          },
+          [open, review, reviewExpanded],
         )
 
         // 打开一次记一次「打开」；顺便复位「本次会话已记过搜索」的标记。
@@ -2339,6 +2458,39 @@
                   : null,
               )
             : null,
+          // 回顾条：一条旧便签，压在列表上方但只有一行高（点开才展开全文），
+          // 所以不抢首屏；`×` 关掉就今天不再打扰。
+          showReview
+            ? h(
+                'div',
+                { className: 'dsn-review' + (reviewExpanded ? ' is-expanded' : '') },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsn-review-main',
+                    title: reviewExpanded ? t('review.collapse') : t('review.expand'),
+                    'aria-expanded': reviewExpanded ? 'true' : 'false',
+                    onClick: function () {
+                      setReviewExpanded(!reviewExpanded)
+                    },
+                  },
+                  h('span', { className: 'dsn-review-label' }, t('review.label')),
+                  h('span', { className: 'dsn-review-text' }, reviewNote.text),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsn-icon-btn dsn-review-close',
+                    title: t('review.dismiss'),
+                    'aria-label': t('review.dismiss'),
+                    onClick: dismissReview,
+                  },
+                  IconClose(12),
+                ),
+              )
+            : null,
           h(
             'div',
             { className: 'dsn-list' + (undoState ? ' has-toast' : '') },
@@ -2503,6 +2655,17 @@
         '.dsn-save{display:inline-flex;align-items:center;gap:5px;min-height:32px;padding:6px 14px;border:0;border-radius:9px;background:var(--dsn-accent);color:var(--dsn-on-accent);font:inherit;font-size:12px;font-weight:650;cursor:pointer;transition:filter .12s ease,transform .12s ease}',
         '.dsn-save:hover:not(:disabled){filter:brightness(.94);transform:translateY(-1px)}',
         '.dsn-save:disabled{opacity:.42;cursor:default;transform:none;filter:none}',
+        // 回顾条：默认只有一行高（~30px），点开才展开正文——所以它占的不是首屏。
+        // 虚线框是刻意的：它和真实便签卡片不是一个东西，别让人以为多了一条便签。
+        '.dsn-review{display:flex;align-items:center;gap:6px;margin:0 14px 8px;padding:3px 4px 3px 10px;border:1px dashed var(--dsn-line);border-radius:9px;background:rgba(127,127,127,.06);min-height:30px}',
+        '.dsn-review.is-expanded{align-items:flex-start}',
+        '.dsn-review-main{display:flex;align-items:baseline;gap:6px;flex:1 1 auto;min-width:0;padding:2px 0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}',
+        '.dsn-review-main:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:2px;border-radius:5px}',
+        '.dsn-review-main:hover .dsn-review-text{color:var(--dsn-fg)}',
+        '.dsn-review-label{flex:0 0 auto;font-size:10px;line-height:1.6;color:var(--dsn-fg-2);letter-spacing:.02em}',
+        '.dsn-review-text{min-width:0;font-size:12px;line-height:1.5;color:var(--dsn-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+        '.dsn-review.is-expanded .dsn-review-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:120px;overflow-y:auto;scrollbar-width:thin}',
+        '.dsn-review-close{flex:0 0 auto}',
         '.dsn-list{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 14px 16px;display:flex;flex-direction:column;gap:9px;scrollbar-width:thin}',
         '.dsn-list.has-toast{padding-bottom:64px}',
         '.dsn-list::-webkit-scrollbar{width:8px}',
