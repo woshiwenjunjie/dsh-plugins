@@ -297,6 +297,56 @@
         return Object.prototype.hasOwnProperty.call(ZH, key) ? ZH[key] : key
       }
 
+      // 把 locale 服务包成「永不抛错」的 t：拿不到、绑定失败、查不到键，都退回内置中文。
+      function wrapT(bound) {
+        return function (key) {
+          try {
+            var value = bound(key)
+            if (typeof value === 'string' && value) return value
+          } catch (error) {
+            // 忽略：查不到键或服务异常都走兜底
+          }
+          return fallbackT(key)
+        }
+      }
+
+      // 惰性取 locale 服务：用 ctx.get 探测（静态插件里 ctx.locale 是服务简写，
+      // 但把 'locale' 写进 inject 会让「服务没就绪」直接卡住整个 apply，得不偿失）。
+      function localeServiceOf(ctx) {
+        try {
+          if (ctx && typeof ctx.get === 'function') {
+            var service = ctx.get('locale')
+            if (service) return service
+          }
+        } catch (error) {
+          // 探测失败就继续走简写
+        }
+        try {
+          return ctx && ctx.locale ? ctx.locale : null
+        } catch (error) {
+          return null
+        }
+      }
+
+      // 注册字典。DSH 的 locale 服务有两种重载（一次传全部语言 / 一次一种语言），
+      // 不同版本对「是否必须覆盖全部内置语言」要求不同：先试整体，失败再逐语言，
+      // 任一成功即可，全都失败也不影响插件本体。
+      function registerLocale(locale) {
+        if (!locale || typeof locale.register !== 'function') return
+        try {
+          locale.register(NS, dicts)
+          return
+        } catch (error) {
+          // 整体注册不被接受时，退回逐语言注册
+        }
+        try {
+          locale.register(NS, 'zh', ZH)
+        } catch (error) {}
+        try {
+          locale.register(NS, 'en', EN)
+        } catch (error) {}
+      }
+
       // ------------------------------------------------------------ 左列边界
       //
       // DSH 的会话列表列带 `data-dsh-sidebar-root`（写在 ui-sidebar 的列容器上），
@@ -613,7 +663,7 @@
       // ---------------------------------------------------------------- 主组件
 
       function StickyNotesOverlay(props) {
-        var ctx = props && props.ctx ? props.ctx : null
+        var locale = props && props.locale ? props.locale : null
         var [store, setStore] = useState(readStore)
         var [draft, setDraft] = useState('')
         var [tick, setTick] = useState(Date.now())
@@ -640,19 +690,31 @@
         // 订阅语言切换；t 在每次渲染重新绑定，保证切换后立刻生效。
         useEffect(
           function () {
-            if (ctx && ctx.locale && typeof ctx.locale.subscribe === 'function') {
-              return ctx.locale.subscribe(function () {
+            if (!locale || typeof locale.subscribe !== 'function') return undefined
+            try {
+              var unsubscribe = locale.subscribe(function () {
                 setLocaleTick(function (n) {
                   return n + 1
                 })
               })
+              if (typeof unsubscribe === 'function') return unsubscribe
+            } catch (error) {
+              // 订阅失败只影响「切换语言要刷新」，不影响渲染
             }
             return undefined
           },
-          [ctx],
+          [locale],
         )
 
-        var t = ctx && ctx.locale && typeof ctx.locale.bind === 'function' ? ctx.locale.bind(NS) : fallbackT
+        var t = fallbackT
+        if (locale && typeof locale.bind === 'function') {
+          try {
+            var boundT = locale.bind(NS)
+            if (typeof boundT === 'function') t = wrapT(boundT)
+          } catch (error) {
+            console.warn('[dsh-sticky-notes] locale.bind 失败，改用内置中文：', error && error.message)
+          }
+        }
 
         var timeLabels = {
           justNow: t('time.justNow'),
@@ -1336,7 +1398,7 @@
       }
 
       function StickyNotesRoot(props) {
-        return h(StickyNotesBoundary, null, h(StickyNotesOverlay, { ctx: props && props.ctx }))
+        return h(StickyNotesBoundary, null, h(StickyNotesOverlay, { locale: props && props.locale }))
       }
 
       // ---------------------------------------------------------------- 样式
@@ -1432,13 +1494,17 @@
       // ---------------------------------------------------------------- 插件
 
       var name = 'dsh-sticky-notes'
-      var inject = ['slots', 'locale']
+      // 只把 slots 作为硬依赖：locale 是可选增强，用 ctx.get 惰性探测，
+      // 免得「语言服务没就绪」把整个插件卡在 waiting（那就一个 slot 都注册不了）。
+      var inject = ['slots']
 
       function apply(ctx) {
         // 注册文案字典：zh 是键集真源，en 对齐，其余语言按 en 回退。
+        // 任何一步失败都只影响文案，不影响便签栏本身。
+        var locale = localeServiceOf(ctx)
         ctx.effect(
           function () {
-            ctx.locale.register(NS, dicts)
+            registerLocale(locale)
           },
           'dsh-sticky-notes: i18n',
         )
@@ -1455,7 +1521,7 @@
 
         ctx.slots.inject('shell.overlay', function* () {
           yield ctx.slots.register({ name: 'shell.overlay', id: 'sticky-notes', order: 860 }, function () {
-            return h(StickyNotesRoot, { ctx: ctx })
+            return h(StickyNotesRoot, { locale: locale })
           })
         })
       }

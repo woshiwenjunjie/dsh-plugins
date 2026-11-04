@@ -210,6 +210,9 @@ node plugins/dsh-my-plugin/test/preview.mjs # 生成预览页
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 插件装了但页面没反应 | 没重装（generation 是快照）或页面没刷新 | remove + add，再刷新 |
+| Host 侧 entry 是 active，页面里却查不到 slot occupant | Host 重启后 `/plugins/events`（HMR 图事件流）断开，页面不再收到图更新，只有刷新才重新拉图 | 刷新页面；这不是插件代码问题 |
+| 把可选服务写进 `inject` 后插件完全不加载 | `inject` 里的服务未就绪时 `apply` 不会执行（Cordis 在等依赖） | 硬依赖只留 `slots`；`locale` 等可选服务用 `ctx.get(...)` 惰性探测 |
+| `locale.register` 抛错导致 slot 从未注册 | 不同版本对字典完整性/重载要求不同 | 注册包 try/catch，失败退回内置文案；`bind` 也包一层兜底 |
 | 加载即报错、整个页面白屏 | client.js 顶层用了 `import`/`export` 或访问了不存在的全局 | 用 `window.__ModuleLoader__.load`，所有 require 加 try/catch |
 | 深色主题下按钮看不见 | 品牌色底 + 白字 | 文字改用 `var(--dsw-alias-bg-layer-1)` |
 | 面板盖住会话列表 | 用 `left: 0` 定位 | 量 `[data-dsh-sidebar-root]` 的右边界 |

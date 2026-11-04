@@ -71,8 +71,9 @@ const fakeCtx = {
   },
   locale: {
     register() {},
+    // 故意返回 undefined：让组件走「bind 拿不到就退回内置中文」的兜底路径。
     bind() {
-      return (key) => key
+      return () => undefined
     },
     subscribe() {
       return () => {}
