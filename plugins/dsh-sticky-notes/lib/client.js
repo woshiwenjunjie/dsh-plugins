@@ -374,7 +374,7 @@
       // 只落在 localStorage，不上报。导出 Markdown 时附在末尾，方便用一周后
       // 拿真实数据决定下一步优化顺序（而不是靠直觉）。
       var METRICS_KEY = 'dsh-sticky-notes:metrics:v1'
-      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'color', 'import']
+      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'color', 'import', 'clipboard', 'lenShort', 'lenMedium', 'lenLong']
       var METRIC_LABELS = {
         open: '打开面板',
         create: '新建便签',
@@ -387,6 +387,10 @@
         export: '导出',
         search: '搜索',
         import: '导入备份',
+        clipboard: '从剪贴板捕获',
+        lenShort: '短便签（≤20 字）',
+        lenMedium: '中便签（21–80 字）',
+        lenLong: '长便签（>80 字）',
       }
 
       function readMetrics() {
@@ -418,6 +422,49 @@
         }
       }
 
+      // 便签长度分布：语音输入值不值得做的唯一证据是「长便签占比」。
+      // 只记桶、不记内容，也不新增 note 字段，所以对备份/旧标签页零影响。
+      function recordLengthMetric(text) {
+        var length = String(text == null ? '' : text).length
+        recordMetric(length <= 20 ? 'lenShort' : length <= 80 ? 'lenMedium' : 'lenLong')
+      }
+
+      // ------------------------------------------------------------ 剪贴板捕获
+      //
+      // 便签的第二种输入：内容已经在剪贴板里，不用再「开面板 → 点输入框 → 粘贴 → 删行」。
+      // 两种档位：快捷姿势（面板内空白处 Ctrl+V）直接成便签、5 秒可撤销；
+      // 菜单档只填进草稿，用户看一眼再记下——防的是「复制了密码/私钥，顺手点一下」。
+      // 硬禁止：不做全局 paste 监听式的「粘到哪都记」，那会把粘进聊天框的 API key 抄进便签。
+      var CLIP_MAX = 2000
+      var CLIP_REJECT = 8000
+      var CLIP_PREVIEW = 30
+
+      function cleanClipText(raw) {
+        return String(raw == null ? '' : raw)
+          .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+          .replace(/\r\n?/g, '\n')
+          .trim()
+      }
+
+      // 焦点在可编辑元素里时，Ctrl+V 必须原样交给浏览器：不拦、不抢。
+      function isEditableTarget(target) {
+        if (!target || typeof target !== 'object') return false
+        var tag = String(target.tagName || target.type || '').toUpperCase()
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+        if (target.isContentEditable === true) return true
+        try {
+          if (typeof target.closest === 'function' && target.closest('input, textarea, [contenteditable="true"]')) return true
+        } catch (error) {
+          // 老环境没有 closest：上面的 tagName 判断已经够用。
+        }
+        return false
+      }
+
+      function clipPreview(text) {
+        var value = String(text == null ? '' : text).replace(/\s+/g, ' ').trim()
+        return value.length > CLIP_PREVIEW ? value.slice(0, CLIP_PREVIEW) + '…' : value
+      }
+
       // ---------------------------------------------------------------- 文案
       //
       // 接入 DSH 的 locale 服务：zh 是键集真源，en 逐键对齐；其余语言自动按 en 回退。
@@ -436,6 +483,7 @@
         'menu.resort': '重排：按最近改动',
         'menu.backup': '导出备份（JSON）',
         'menu.restore': '从备份恢复…',
+        'menu.clipboard': '从剪贴板记下（先进草稿）',
         'toast.imported': '已导入',
         'toast.updated': '更新',
         'toast.backedUp': '备份已导出',
@@ -443,6 +491,13 @@
         'toast.copyFailed': '复制失败，请手动选择文本',
         'toast.importFailed': '不是本插件的备份文件',
         'toast.importEmpty': '备份文件里没有便签',
+        'toast.clipCreated': '已从剪贴板记下',
+        'toast.clipToDraft': '已放入草稿，看一眼再记下',
+        'toast.clipEmpty': '剪贴板里没有文字',
+        'toast.clipDuplicate': '这条已经在列表里',
+        'toast.clipTooLong': '内容太长，便签不是剪藏（上限 8000 字）',
+        'toast.clipLongDraft': '内容有点长，已放进草稿',
+        'toast.clipUnavailable': '这个环境读不到剪贴板，可以点输入框按 Ctrl+V',
         close: '收起便签栏',
         'close.esc': '收起便签栏（Esc）',
         'composer.placeholder': '写下此刻的想法…（Ctrl+Enter 记下）',
@@ -511,6 +566,10 @@
         'metric.search': '搜索',
         'metric.color': '换色',
         'metric.import': '导入备份',
+        'metric.clipboard': '从剪贴板捕获',
+        'metric.lenShort': '短便签（≤20 字）',
+        'metric.lenMedium': '中便签（21–80 字）',
+        'metric.lenLong': '长便签（>80 字）',
       }
 
       var EN = {
@@ -525,6 +584,7 @@
         'menu.resort': 'Re-sort: by last edited',
         'menu.backup': 'Export backup (JSON)',
         'menu.restore': 'Restore from backup…',
+        'menu.clipboard': 'Capture clipboard into draft',
         'toast.imported': 'Imported',
         'toast.updated': 'updated',
         'toast.backedUp': 'Backup exported',
@@ -532,6 +592,13 @@
         'toast.copyFailed': "Couldn't copy — select the text manually",
         'toast.importFailed': "This isn't a notes backup file",
         'toast.importEmpty': 'That backup has no notes',
+        'toast.clipCreated': 'Captured from clipboard',
+        'toast.clipToDraft': 'Added to the draft — review, then save',
+        'toast.clipEmpty': 'The clipboard has no text',
+        'toast.clipDuplicate': 'That note is already in the list',
+        'toast.clipTooLong': 'Too long for a note (8000 char limit)',
+        'toast.clipLongDraft': 'Long text — added to the draft',
+        'toast.clipUnavailable': "Can't read the clipboard here — click the input and press Ctrl+V",
         close: 'Collapse notes',
         'close.esc': 'Collapse notes (Esc)',
         'composer.placeholder': 'Jot something… (Ctrl+Enter to save)',
@@ -600,6 +667,10 @@
         'metric.search': 'Searches',
         'metric.color': 'Color changes',
         'metric.import': 'Backups restored',
+        'metric.clipboard': 'Clipboard captures',
+        'metric.lenShort': 'Short notes (≤20 chars)',
+        'metric.lenMedium': 'Medium notes (21–80 chars)',
+        'metric.lenLong': 'Long notes (>80 chars)',
       }
 
       var dicts = { zh: ZH, en: EN }
@@ -1230,6 +1301,8 @@
         return h(
           'article',
           {
+            // 重复内容不新增时，用这个属性把那张卡滚进视野并闪一下。
+            'data-dsn-note': note.id,
             className:
               'dsn-note dsn-c-' + note.color + (note.pinned && !archived ? ' is-pinned' : '') + (archived ? ' is-archived' : ''),
             // 拖动时不做 React 状态更新：高亮/半透明直接改 DOM class，
@@ -1996,9 +2069,122 @@
           setDraft('')
           setTick(now)
           recordMetric('create')
+          recordLengthMetric(value)
         }, [activeSessionId])
 
-        // 搜索词一变，「哪条在编辑」就复位：换了一次搜索还停在编辑态会很怪。
+        // 剪贴板捕获的统一入口：
+        //   mode 'note'  = 快捷档，直接成一条便签（toast 里给预览 + 5 秒撤销）；
+        //   mode 'draft' = 菜单档，只填进草稿，用户看一眼再 Ctrl+Enter。
+        function findDuplicate(text) {
+          var list = latestStore.current.notes
+          for (var i = 0; i < list.length; i += 1) {
+            if (list[i].text === text) return list[i]
+          }
+          return null
+        }
+
+        // 重复内容不新增，滚过去闪一下，让用户看到「已经有了」。
+        function highlightNote(id) {
+          try {
+            if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return
+            var el = document.querySelector('[data-dsn-note="' + String(id) + '"]')
+            if (!el) return
+            if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' })
+            if (el.classList && typeof el.classList.add === 'function') {
+              el.classList.add('is-flash')
+              window.setTimeout(function () {
+                if (el.classList && typeof el.classList.remove === 'function') el.classList.remove('is-flash')
+              }, 1400)
+            }
+          } catch (error) {
+            // 高亮失败不影响已经完成的捕获。
+          }
+        }
+
+        var captureFromText = useCallback(
+          function (raw, mode) {
+            var value = cleanClipText(raw)
+            if (!value) {
+              showToast({ kind: 'error', text: t('toast.clipEmpty') }, 2400)
+              return
+            }
+            if (value.length > CLIP_REJECT) {
+              showToast({ kind: 'error', text: t('toast.clipTooLong') }, 3200)
+              return
+            }
+            var existing = findDuplicate(value)
+            if (existing) {
+              highlightNote(existing.id)
+              showToast({ kind: 'info', text: t('toast.clipDuplicate') }, 2400)
+              return
+            }
+            // 太长的不适合直接成卡：退到草稿，让用户自己删减。
+            if (value.length > CLIP_MAX && mode === 'note') {
+              setDraft(value)
+              showToast({ kind: 'info', text: t('toast.clipLongDraft') }, 3200)
+              recordMetric('clipboard')
+              recordLengthMetric(value)
+              return
+            }
+            if (mode === 'draft') {
+              setDraft(value)
+              showToast({ kind: 'info', text: t('toast.clipToDraft') }, 2400)
+              recordMetric('clipboard')
+              recordLengthMetric(value)
+              return
+            }
+            var now = Date.now()
+            var note = {
+              id: newId(),
+              text: value,
+              color: DEFAULT_COLOR,
+              pinned: false,
+              archived: false,
+              archivedAt: 0,
+              sessionId: activeSessionId,
+              createdAt: now,
+              updatedAt: now,
+              order: nextOrder(latestStore.current.notes),
+            }
+            setStore(function (prev) {
+              return { notes: [note].concat(prev.notes).slice(0, MAX_NOTES), open: true }
+            })
+            setTick(now)
+            recordMetric('create')
+            recordLengthMetric(value)
+            recordMetric('clipboard')
+            showToast({ kind: 'clip', note: note, preview: clipPreview(value) }, UNDO_MS)
+          },
+          [t, activeSessionId],
+        )
+
+        // 面板打开时，空白处 Ctrl+V = 从剪贴板直接记一条。
+        // 焦点在任何输入框里时完全不拦（原生粘贴），也绝不注册「粘到哪都记」的全局监听。
+        useEffect(
+          function () {
+            if (!open) return undefined
+            if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+            function onPaste(event) {
+              if (isEditableTarget(event.target)) return
+              var data = event.clipboardData
+              if (!data || typeof data.getData !== 'function') return
+              var text = ''
+              try {
+                text = data.getData('text/plain')
+              } catch (error) {
+                text = ''
+              }
+              if (!cleanClipText(text)) return
+              if (typeof event.preventDefault === 'function') event.preventDefault()
+              captureFromText(text, 'note')
+            }
+            document.addEventListener('paste', onPaste, true)
+            return function () {
+              document.removeEventListener('paste', onPaste, true)
+            }
+          },
+          [open, captureFromText],
+        )
         useEffect(
           function () {
             setEditingId(null)
@@ -2162,6 +2348,8 @@
             return text
           }
           if (pending.kind === 'delete') return t('toast.deleted')
+          // 从剪贴板直接成卡的提示：带上前 30 字，让用户确认「记对了东西」。
+          if (pending.kind === 'clip') return t('toast.clipCreated') + (pending.preview ? ' · ' + pending.preview : '')
           return pending.text || ''
         }
 
@@ -2230,6 +2418,24 @@
           done(false)
         }, [t])
 
+        // 菜单档：先读剪贴板、再填进草稿（不直接建卡）。读不到就如实说，并给手动粘贴的退路。
+        var captureClipboardToDraft = useCallback(function () {
+          var nav = typeof navigator !== 'undefined' && navigator ? navigator : null
+          var clipboard = nav && nav.clipboard ? nav.clipboard : null
+          if (!clipboard || typeof clipboard.readText !== 'function') {
+            showToast({ kind: 'error', text: t('toast.clipUnavailable') }, 3200)
+            return
+          }
+          Promise.resolve(clipboard.readText()).then(
+            function (raw) {
+              captureFromText(raw, 'draft')
+            },
+            function () {
+              showToast({ kind: 'error', text: t('toast.clipUnavailable') }, 3200)
+            },
+          )
+        }, [captureFromText, t])
+
         function undoAction() {
           var pending = undoState
           if (!pending) return
@@ -2242,6 +2448,20 @@
             var restore = pending.notes
             setStore(function () {
               return { notes: restore, open: true }
+            })
+            setUndoState(null)
+            recordMetric('undo')
+            return
+          }
+          if (pending.kind === 'clip') {
+            // 从剪贴板直接成卡的撤销 = 把这条再拿走（它是「刚加进来的」，不是「刚删掉的」）。
+            setStore(function (prev) {
+              return {
+                notes: prev.notes.filter(function (note) {
+                  return note.id !== pending.note.id
+                }),
+                open: prev.open,
+              }
             })
             setUndoState(null)
             recordMetric('undo')
@@ -2465,6 +2685,21 @@
                     },
                     IconGrip(14),
                     h('span', null, t('menu.resort')),
+                  ),
+                  // 剪贴板捕获的「安全档」：先填草稿，用户看一眼再记下。
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsn-menu-item',
+                      onClick: function () {
+                        setMenuOpen(false)
+                        captureClipboardToDraft()
+                      },
+                    },
+                    IconCopy(14),
+                    h('span', null, t('menu.clipboard')),
                   ),
                 )
               : null,
@@ -2950,6 +3185,9 @@
         '.dsn-note.is-pinned{box-shadow:inset 0 0 0 1px rgba(127,127,127,.1)}',
         '.dsn-note.is-archived{opacity:.62}',
         '.dsn-note.is-archived .dsn-note-input{cursor:default}',
+        // 从剪贴板捕获到重复内容时：滚过去闪两下，别让用户以为「没反应」。
+        '.dsn-note.is-flash{animation:dsn-flash 1.2s ease-out}',
+        '@keyframes dsn-flash{0%,100%{box-shadow:0 0 0 0 rgba(127,127,127,0)}25%,75%{box-shadow:0 0 0 3px var(--dsn-accent)}}',
         '.dsn-archived-mark{font-size:9.5px;line-height:1.6;color:var(--dsn-fg-2);background:rgba(127,127,127,.16);border-radius:6px;padding:0 5px;white-space:nowrap}',
         // 来源会话：和 pin-mark 同一套「正文色压浅灰」的对比度算法（light 5.8 / dark 10.4 起算，
         // 叠加 12% 灰底后仍在 AA 之上）；限宽 + 省略号，长会话名不挤走右侧按钮。

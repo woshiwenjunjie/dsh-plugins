@@ -56,6 +56,19 @@ let passCardRenders = 0
 let maxPassCardRenders = 0
 // 挂在 window 上的 keydown 监听也要能真触发：Alt+Shift+N / Esc / Ctrl+K 都走这条路。
 const windowListeners = new Map()
+// document 上的监听（面板内粘贴、点外面收起）：粘贴捕获要能真的派发，所以也记录下来。
+const documentListeners = new Map()
+function addDocumentListener(type, fn) {
+  const list = documentListeners.get(type) || []
+  list.push(fn)
+  documentListeners.set(type, list)
+}
+function removeDocumentListener(type, fn) {
+  const list = documentListeners.get(type)
+  if (!list) return
+  const index = list.indexOf(fn)
+  if (index !== -1) list.splice(index, 1)
+}
 function addWindowListener(type, fn) {
   const list = windowListeners.get(type) || []
   list.push(fn)
@@ -242,8 +255,8 @@ const sandbox = {
     head: { appendChild() {} },
     body: { appendChild() {} },
     createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, remove() {}, click() {} }),
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: addDocumentListener,
+    removeEventListener: removeDocumentListener,
     querySelector: (selector) =>
       selector === '[data-dsh-sidebar-root]' ? { getBoundingClientRect: () => ({ right: 248 }) } : null,
   },
@@ -263,6 +276,11 @@ const sandbox = {
         if (clipboardFail) return Promise.reject(new Error('denied'))
         clipboardText = String(text)
         return Promise.resolve()
+      },
+      // 菜单档「从剪贴板记下」会先读再填草稿：测试里读的是同一个变量。
+      readText() {
+        if (clipboardFail) return Promise.reject(new Error('denied'))
+        return Promise.resolve(clipboardText == null ? '' : String(clipboardText))
       },
     },
   },
@@ -360,6 +378,21 @@ function pressKey(patch) {
   const event = Object.assign({ preventDefault() {}, stopPropagation() {} }, patch)
   for (const listener of (windowListeners.get('keydown') || []).slice()) listener(event)
   flush()
+}
+
+/** 派发一次 document paste：焦点不在输入框时插件才接管（快捷档直接成便签）。 */
+function dispatchPaste({ target = null, text = '' } = {}) {
+  const event = {
+    target,
+    defaultPrevented: false,
+    preventDefault() {
+      event.defaultPrevented = true
+    },
+    clipboardData: { getData: (kind) => (kind === 'text/plain' ? text : '') },
+  }
+  for (const listener of (documentListeners.get('paste') || []).slice()) listener(event)
+  flush()
+  return event
 }
 
 function cards() {
@@ -502,8 +535,9 @@ function remount(nextNotes, props) {
   refSlots = []
   effectSlots = []
   timers.clear()
-  // 卸载会移除组件挂在 window 上的监听；重挂载相当于重新开始，旧的不能留。
+  // 卸载会移除组件挂在 window / document 上的监听；重挂载相当于重新开始，旧的不能留。
   windowListeners.clear()
+  documentListeners.clear()
   cursor = 0
   elements = []
   focusedElement = null
@@ -691,7 +725,7 @@ const roundTripSeed = [
 remount(roundTripSeed)
 
 act(() => menuButton().props.onClick({}))
-check('「更多」菜单有三项（备份 / 恢复 / 重排）', menuItems().length, 3)
+check('「更多」菜单有四项（备份 / 恢复 / 重排 / 从剪贴板记下）', menuItems().length, 4)
 
 // 导出 → 清空 → 导入，字段要一模一样
 await actAsync(() => menuItems()[0].props.onClick({}))
@@ -1274,6 +1308,90 @@ check('按最近改动重排后最新写在最上面', cardTexts()[0], '刚记�
 
 check('新便签的 order 比所有人都小', Math.min(...afterAdd.map((note) => note.order)) === afterAdd.find((note) => note.text === '刚记的').order, true)
 
+// ---------------------------------------------------------------- 剪贴板捕获
+//
+// 两条入口、两种行为：面板内空白处 Ctrl+V 直接成便签（5 秒撤销）；
+// 「更多」菜单里只填进草稿（先看后交，敏感内容不会因一次误点落盘）。
+
+function panelEl() {
+  return elements.find((el) => el.type === 'aside' && el.props.className === 'dsn-panel')
+}
+function metricsNow() {
+  const raw = storage.get('dsh-sticky-notes:metrics:v1')
+  return raw ? JSON.parse(raw).counters : {}
+}
+
+storage.delete('dsh-sticky-notes:metrics:v1')
+storage.delete('dsh-sticky-notes:draft')
+remount([{ id: 'c1', text: '已经在这条', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 }])
+check('剪贴板组初始只有一条', cardTexts(), ['已经在这条'])
+
+// 1. 快捷档：焦点在面板空白处，Ctrl+V 直接成一条（清洗首尾空白、保留内部换行）
+clipboardText = '  从聊天框复制的一段结论\r\n第二行  '
+const pasted = dispatchPaste({ target: panelEl(), text: clipboardText })
+check('空白处粘贴被接管（原生粘贴被拦）', pasted.defaultPrevented, true)
+check('粘贴直接多出一条便签', cardTexts().length, 2)
+check('内容清洗：去首尾空白、CRLF 归一、内部换行保留', cardTexts()[0], '从聊天框复制的一段结论\n第二行')
+check('提示带前 30 字预览', toastEl() && toastEl().props.children[0].props.children, '已从剪贴板记下 · 从聊天框复制的一段结论 第二行')
+check('剪贴板捕获计数 +1', metricsNow().clipboard, 1)
+check('短便签计入长度桶', metricsNow().lenShort, 1)
+
+// 2. 5 秒内可撤销：和删除走同一条通道
+act(() => toastUndo().props.onClick({}))
+check('撤销后回到一条', cardTexts(), ['已经在这条'])
+
+// 3. 焦点在输入框里时绝不能接管：Ctrl+V 必须是原生粘贴
+const nativePaste = dispatchPaste({ target: draftArea(), text: '粘进草稿的' })
+check('输入框内粘贴不被接管', nativePaste.defaultPrevented, false)
+check('输入框内粘贴不新增便签', cardTexts().length, 1)
+
+// 4. 重复内容：不新增，提示「已经在列表里」
+const dupPaste = dispatchPaste({ target: panelEl(), text: '已经在这条' })
+check('重复内容仍然接管（不交给原生粘贴）', dupPaste.defaultPrevented, true)
+check('重复内容不新增', cardTexts().length, 1)
+check('重复内容给提示', toastEl() && toastEl().props.children[0].props.children, '这条已经在列表里')
+
+// 5. 超长（>8000）直接拒绝；2000-8000 退到草稿
+dispatchPaste({ target: panelEl(), text: 'x'.repeat(9000) })
+check('超长内容被拒绝', cardTexts().length, 1)
+check('超长内容说清楚原因', toastEl() && toastEl().props.children[0].props.children, '内容太长，便签不是剪藏（上限 8000 字）')
+const longText = 'y'.repeat(2500)
+dispatchPaste({ target: panelEl(), text: longText })
+check('2000-8000 字退到草稿而不是成卡', cardTexts().length, 1)
+check('长内容确实进了草稿', draftArea().props.value, longText)
+check('长内容提示进草稿', toastEl() && toastEl().props.children[0].props.children, '内容有点长，已放进草稿')
+
+// 6. 菜单档：读剪贴板 → 只填草稿，不建卡
+clipboardText = '剪贴板里的第二段'
+act(() => menuButton().props.onClick({}))
+check('菜单最后一项是从剪贴板记下', flattenText(menuItems()[3].props.children), '从剪贴板记下（先进草稿）')
+await actAsync(() => menuItems()[3].props.onClick({}))
+check('菜单档只填草稿', draftArea().props.value, '剪贴板里的第二段')
+check('菜单档不建卡', cardTexts().length, 1)
+check('菜单档提示先看再记', toastEl() && toastEl().props.children[0].props.children, '已放入草稿，看一眼再记下')
+
+// 7. 草稿里按 Ctrl+Enter 才算记下（先看后交的意义）
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+check('确认后草稿变成一条便签', cardTexts()[0], '剪贴板里的第二段')
+check('确认后草稿清空', draftArea().props.value, '')
+
+// 8. 读不到剪贴板：诚实报错 + 给手动粘贴的退路
+clipboardFail = true
+act(() => menuButton().props.onClick({}))
+await actAsync(() => menuItems()[3].props.onClick({}))
+check(
+  '读不到剪贴板时给退路提示',
+  toastEl() && toastEl().props.children[0].props.children,
+  '这个环境读不到剪贴板，可以点输入框按 Ctrl+V',
+)
+clipboardFail = false
+
+// 9. 空剪贴板：明确说「没有文字」，别表现为按钮坏了
+clipboardText = '   '
+act(() => menuButton().props.onClick({}))
+await actAsync(() => menuItems()[3].props.onClick({}))
+check('空剪贴板给明确提示', toastEl() && toastEl().props.children[0].props.children, '剪贴板里没有文字')
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -1282,5 +1400,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示）',
 )
