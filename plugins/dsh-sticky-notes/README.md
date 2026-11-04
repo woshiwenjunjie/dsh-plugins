@@ -138,10 +138,25 @@ dsh plugin --profile web add link:<本目录绝对路径>
 只在 **DSH `0.2.1-rc.2`**（桌面端 0.12.1）实测通过。`package.json` 里的
 `dsh.compatibility.dshReleases` 只声明实测过的版本；换版本请先跑 `npm test`。
 
+## 长列表不卡（0.1.5）
+
+列表上限 500 条。卡片是 `memo(NoteCard)`，父组件传下去的 `note` / `t` / `timeLabels` / 回调
+引用都保持稳定，所以打字时**只有正在编辑的那 1 张卡片重渲染**。
+
+| 便签数 | 一次重渲染构造的元素 | 耗时（Node 内测得） |
+|---|---|---|
+| 100 | 2053 → 50 | 0.56ms → 0.10ms |
+| 300 | 6053 → 50 | 1.62ms → 0.21ms |
+| 500 | 10053 → 50 | 3.42ms → 0.35ms |
+
+数字由 `npm run perf` 产出，可传参对比任意两个版本；这里量的是 JSX 构造成本，
+不含浏览器 DOM diff，所以是下限收益而不是绝对耗时。
+
 ## 开发
 
 ```bash
 npm test        # smoke（加载与注册）+ behavior（迷你 React 驱动真实交互）
+npm run perf    # 长列表重渲染成本（300 条）：node test/perf.mjs <条数> <轮数> [客户端文件]
 npm run preview # 用真实组件输出生成静态预览页到 test/out/
 ```
 

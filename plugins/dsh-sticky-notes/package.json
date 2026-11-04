@@ -1,6 +1,6 @@
 {
   "name": "dsh-sticky-notes",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "DSH Web 左侧便签栏：随手记录、置顶、搜索、归档，数据只存在本机浏览器。",
   "type": "module",
   "main": "lib/index.js",
@@ -40,6 +40,7 @@
   },
   "scripts": {
     "test": "node test/smoke.mjs && node test/behavior.mjs",
+    "perf": "node test/perf.mjs 300 60",
     "preview": "node test/preview.mjs",
     "check": "node ../../scripts/check.mjs"
   },
