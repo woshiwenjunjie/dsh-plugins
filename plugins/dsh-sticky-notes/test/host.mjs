@@ -162,6 +162,15 @@ result = await call()
 check('云端 provider 不放行', result.json.catalog.available, false)
 check('云端 provider 的 reason', result.json.catalog.reason, 'not-local')
 
+service = makeService({ provider: readyProvider({ preparation: { phase: 'standby' } }) })
+result = await call()
+check('standby（模型已就绪、worker 未启动）要放行', result.json.catalog.available, true)
+check('standby 不产生 reason', result.json.catalog.reason, '')
+
+service = makeService({ provider: readyProvider({ preparation: { phase: 'waking' } }) })
+result = await call()
+check('waking（worker 正在拉起）要放行', result.json.catalog.available, true)
+
 service = makeService({ provider: readyProvider({ preparation: { phase: 'downloading' } }) })
 result = await call()
 check('模型未就绪时不放行', result.json.catalog.available, false)

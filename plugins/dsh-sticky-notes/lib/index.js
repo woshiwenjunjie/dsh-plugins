@@ -26,6 +26,13 @@ const LIMITS = {
   maxDurationSeconds: 60,
 }
 
+/**
+ * 可录音的 preparation 阶段。官方语音客户端认可 ready / standby / waking：
+ * standby = 模型文件已校验、worker 还没启动（转写时会拉起），不是「没准备好」。
+ * 之前只放行 ready，把正常的 standby 误判成 not-ready，入口被禁用。
+ */
+const USABLE_PREPARATION = { ready: true, standby: true, waking: true }
+
 /** transcribe 请求体上限：base64 比原音频大 4/3，再留一点 JSON 余量。 */
 const MAX_BODY_BYTES = Math.ceil(LIMITS.maxAudioBytes / 3) * 4 + 64 * 1024
 
@@ -102,7 +109,7 @@ function catalog(ctx, res) {
   let reason = ''
   if (!provider) reason = 'no-provider'
   else if (provider.location !== 'host-local') reason = 'not-local'
-  else if (preparation && preparation !== 'ready') reason = 'not-ready'
+  else if (preparation && !USABLE_PREPARATION[preparation]) reason = 'not-ready'
   return json(res, 200, {
     ok: true,
     catalog: {

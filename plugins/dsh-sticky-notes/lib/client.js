@@ -576,13 +576,28 @@
         })
       }
 
+      /**
+       * catalog 能不能录音。以 Host 的 available 为准，但兼容旧版 Host 的过严判断：
+       * standby（模型文件已就绪、worker 未启动）和 waking（正在拉起）都能直接转写，
+       * 官方客户端也认这三种；旧 Host 只把 ready 算 available，客户端这边兜住。
+       */
+      function voiceCatalogUsable(catalog) {
+        if (!catalog) return false
+        if (catalog.available === true) return true
+        if (catalog.location !== 'host-local') return false
+        var phase = catalog.preparation
+        return phase === 'ready' || phase === 'standby' || phase === 'waking'
+      }
+
       /** 停止一条录音会话：清定时器、停轨道、关 AudioContext（不涉及 UI 状态）。 */
       function disposeVoiceSession(session) {
         if (!session) return
         session.cancelled = true
         if (session.timer) window.clearInterval(session.timer)
+        if (session.monitor) window.clearInterval(session.monitor)
         if (session.maxTimer) window.clearTimeout(session.maxTimer)
         session.timer = 0
+        session.monitor = 0
         session.maxTimer = 0
         try {
           if (session.recorder && session.recorder.state === 'recording') session.recorder.stop()
@@ -679,6 +694,9 @@
         'voice.empty': '没听清，再说一次',
         'voice.tooLong': '录音太长了（上限 60 秒）',
         'voice.audioInvalid': '录音格式不对，请重试',
+        'voice.retry': '重试',
+        'voice.remaining': '剩余',
+        'voice.seconds': '秒',
         'voice.reason.loading': '正在检查语音服务…',
         'voice.reason.no-service': 'DSH 语音服务未启用',
         'voice.reason.no-provider': '没有可用的语音识别引擎',
@@ -803,6 +821,9 @@
         'voice.empty': "Didn't catch that — say it again",
         'voice.tooLong': 'Recording is too long (60s limit)',
         'voice.audioInvalid': 'Recording format was invalid — try again',
+        'voice.retry': 'Retry',
+        'voice.remaining': 'Left',
+        'voice.seconds': 's',
         'voice.reason.loading': 'Checking the speech service…',
         'voice.reason.no-service': 'DSH speech service is not enabled',
         'voice.reason.no-provider': 'No speech recognizer is available',
@@ -2074,7 +2095,7 @@
         /** 开始录音：拿麦克风 → MediaRecorder → 计时 + 60 秒自动停。target：draft / search。 */
         function startVoice(target) {
           if (voiceRef.current || voice.phase !== 'idle') return
-          if (!voiceCatalog || voiceCatalog.available !== true) {
+          if (!voiceCatalogUsable(voiceCatalog)) {
             showToast({ kind: 'error', text: voiceReasonText(voiceCatalog && voiceCatalog.reason) }, 4000)
             return
           }
@@ -2087,22 +2108,27 @@
           var session = {
             startedAt: Date.now(),
             elapsed: 0,
+            level: 0,
+            lastVoiceAt: 0,
             chunks: [],
             stream: null,
             recorder: null,
             context: null,
+            analyser: null,
+            samples: null,
             timer: 0,
+            monitor: 0,
             maxTimer: 0,
             cancelled: false,
             stopping: false,
           }
           voiceRef.current = session
-          setVoice({ phase: 'recording', elapsed: 0 })
+          setVoice({ phase: 'recording', elapsed: 0, level: 0 })
           function failStart(code) {
             if (voiceRef.current === session) voiceRef.current = null
             disposeVoiceSession(session)
-            setVoice({ phase: 'idle', elapsed: 0 })
-            showToast({ kind: 'error', text: voiceErrorText(code) }, 4000)
+            setVoice({ phase: 'idle', elapsed: 0, level: 0 })
+            showVoiceRetry(code)
           }
           nav.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false }).then(
             function (stream) {
@@ -2115,6 +2141,19 @@
                 return
               }
               session.stream = stream
+              // 电平采样：既画电平条，也用来做「说完静音 1.8 秒自动停」。
+              try {
+                var Ctx = typeof window !== 'undefined' ? window.AudioContext || window.webkitAudioContext : null
+                if (Ctx) {
+                  session.context = new Ctx()
+                  session.analyser = session.context.createAnalyser()
+                  session.analyser.fftSize = 256
+                  session.samples = new Float32Array(256)
+                  session.context.createMediaStreamSource(stream).connect(session.analyser)
+                }
+              } catch (error) {
+                session.analyser = null
+              }
               try {
                 var recorder = new MediaRecorder(stream)
                 session.recorder = recorder
@@ -2126,12 +2165,33 @@
                 failStart('unavailable')
                 return
               }
-              session.timer = window.setInterval(function () {
-                var elapsed = Math.floor((Date.now() - session.startedAt) / 1000)
+              session.monitor = window.setInterval(function () {
+                if (session.cancelled || session.stopping) return
+                var now = Date.now()
+                var elapsed = Math.floor((now - session.startedAt) / 1000)
+                var level = 0
+                if (session.analyser && session.samples) {
+                  try {
+                    session.analyser.getFloatTimeDomainData(session.samples)
+                    var sum = 0
+                    for (var i = 0; i < session.samples.length; i += 1) sum += session.samples[i] * session.samples[i]
+                    level = Math.sqrt(sum / session.samples.length)
+                  } catch (error) {
+                    level = 0
+                  }
+                }
+                if (level > 0.02) session.lastVoiceAt = now
+                var bucket = Math.min(1, Math.round(level * 10) / 10)
                 setVoice(function (prev) {
-                  return prev.phase === 'recording' && prev.elapsed !== elapsed ? { phase: 'recording', elapsed: elapsed } : prev
+                  if (prev.phase !== 'recording') return prev
+                  if (prev.elapsed === elapsed && prev.level === bucket) return prev
+                  return { phase: 'recording', elapsed: elapsed, level: bucket }
                 })
-              }, 500)
+                // 说过话之后静音 1.8 秒 → 自动停止并转写（说完不用再去点停止）。
+                if (session.lastVoiceAt && now - session.lastVoiceAt > 1800 && now - session.startedAt > 1200) {
+                  stopVoice()
+                }
+              }, 150)
               session.maxTimer = window.setTimeout(function () {
                 stopVoice()
               }, VOICE_MAX_SECONDS * 1000)
@@ -2158,7 +2218,7 @@
             window.clearTimeout(session.maxTimer)
             session.maxTimer = 0
           }
-          setVoice({ phase: 'transcribing', elapsed: session.elapsed })
+          setVoice({ phase: 'transcribing', elapsed: session.elapsed, level: 0 })
           var recorder = session.recorder
           var stopped = new Promise(function (resolve) {
             recorder.onstop = function () {
@@ -2184,10 +2244,13 @@
               }
               if (text) {
                 if (voiceTargetRef.current === 'search') {
-                  // 语音搜索：转写直接填进搜索框并立即筛（拍板：说完就看结果）。
-                  setQuery(text)
-                  var searchNode = searchRef.current
-                  if (searchNode && typeof searchNode.focus === 'function') searchNode.focus()
+                  // 语音搜索：转写直接填进搜索框并立即筛；去掉尾部标点（「开会。」→「开会」）。
+                  var term = text.replace(/[\s。．.!！?？,，、;；:：…]+$/, '') || text
+                  setQuery(term)
+                  window.setTimeout(function () {
+                    var searchNode = searchRef.current
+                    if (searchNode && typeof searchNode.focus === 'function') searchNode.focus()
+                  }, 0)
                   if (!searchRecorded.current) {
                     searchRecorded.current = true
                     recordMetric('search')
@@ -2198,7 +2261,7 @@
               }
               if (voiceRef.current === session) voiceRef.current = null
               disposeVoiceSession(session)
-              setVoice({ phase: 'idle', elapsed: 0 })
+              setVoice({ phase: 'idle', elapsed: 0, level: 0 })
               setVoiceUsed(true)
               recordMetric('voice')
               showToast({ kind: 'info', text: t('voice.done') }, 2600)
@@ -2252,9 +2315,14 @@
         function finishVoiceFailure(session, code) {
           if (voiceRef.current === session) voiceRef.current = null
           disposeVoiceSession(session)
-          setVoice({ phase: 'idle', elapsed: 0 })
+          setVoice({ phase: 'idle', elapsed: 0, level: 0 })
           if (code === 'cancelled') return
-          showToast({ kind: 'error', text: voiceErrorText(code) }, 4000)
+          showVoiceRetry(code)
+        }
+
+        /** 语音失败：给一条带「重试」的提示，不用重新找入口。 */
+        function showVoiceRetry(code) {
+          showToast({ kind: 'voice-retry', code: code, target: voiceTargetRef.current, text: voiceErrorText(code) }, 6000)
         }
 
         /** 取消录音/转写：释放麦克风、中止请求，界面回到 idle。 */
@@ -2268,7 +2336,7 @@
             voiceAbortRef.current = null
           }
           if (session) disposeVoiceSession(session)
-          setVoice({ phase: 'idle', elapsed: 0 })
+          setVoice({ phase: 'idle', elapsed: 0, level: 0 })
         }
 
         /** 识别文本进草稿：光标在草稿里就插到光标处，否则追加到末尾；不自动提交。 */
@@ -2419,6 +2487,8 @@
           [notes, search],
         )
         var searchable = notes.length >= SEARCH_THRESHOLD
+        // 搜索框的显示条件：够多、已有搜索词、或正在语音搜索/转写（头部麦克风随时可用）。
+        var searchVisible = searchable || Boolean(query) || voice.phase !== 'idle'
 
         // 回顾条只在「今天挑的那条、还没关、还在、不是归档」时出现；
         // 搜索态与归档视图里让位——那时列表本身才是焦点。
@@ -3354,6 +3424,24 @@
             h(
               'div',
               { className: 'dsn-head-actions' },
+              // 语音搜索入口放头部：不用先有搜索框、也不用翻菜单，随时能说一句就筛。
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className:
+                    'dsn-icon-btn dsn-head-voice' +
+                    (voice.phase === 'recording' && voiceTargetRef.current === 'search' ? ' is-recording' : ''),
+                  title: voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
+                  'aria-label': voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
+                  disabled: voice.phase === 'idle' && !voiceCatalogUsable(voiceCatalog),
+                  onClick: function () {
+                    if (voice.phase === 'recording') stopVoice()
+                    else if (voice.phase === 'idle') startVoice('search')
+                  },
+                },
+                voice.phase === 'recording' && voiceTargetRef.current === 'search' ? IconStop(14) : IconMic(14),
+              ),
               h(
                 'button',
                 {
@@ -3450,8 +3538,8 @@
                       type: 'button',
                       role: 'menuitem',
                       className: 'dsn-menu-item',
-                      disabled: voice.phase !== 'idle' || !voiceCatalog || voiceCatalog.available !== true,
-                      title: voiceCatalog && voiceCatalog.available === true ? t('menu.voice') : voiceReasonText(voiceCatalog && voiceCatalog.reason),
+                      disabled: voice.phase !== 'idle' || !voiceCatalogUsable(voiceCatalog),
+                      title: voiceCatalogUsable(voiceCatalog) ? t('menu.voice') : voiceReasonText(voiceCatalog && voiceCatalog.reason),
                       onClick: function () {
                         setMenuOpen(false)
                         startVoice()
@@ -3484,8 +3572,28 @@
                   h(
                     'span',
                     { className: 'dsn-voice-text' },
-                    voice.phase === 'recording' ? t('voice.recording') + ' · ' + formatClock(voice.elapsed) : t('voice.transcribing'),
+                    voice.phase === 'recording'
+                      ? t('voice.recording') +
+                        ' · ' +
+                        formatClock(voice.elapsed) +
+                        ' · ' +
+                        t('voice.remaining') +
+                        ' ' +
+                        Math.max(0, VOICE_MAX_SECONDS - voice.elapsed) +
+                        ' ' +
+                        t('voice.seconds')
+                      : t('voice.transcribing'),
                   ),
+                  voice.phase === 'recording'
+                    ? h(
+                        'span',
+                        { className: 'dsn-voice-level', 'aria-hidden': 'true' },
+                        h('span', {
+                          className: 'dsn-voice-level-fill',
+                          style: { width: Math.round((voice.level || 0) * 100) + '%' },
+                        }),
+                      )
+                    : null,
                   h(
                     'button',
                     {
@@ -3542,7 +3650,7 @@
                       className: 'dsn-icon-btn dsn-voice-mic' + (voice.phase === 'recording' ? ' is-recording' : ''),
                       title: voice.phase === 'recording' ? t('voice.stop') : t('voice.mic'),
                       'aria-label': voice.phase === 'recording' ? t('voice.stop') : t('voice.mic'),
-                      disabled: voice.phase === 'idle' && (!voiceCatalog || voiceCatalog.available !== true),
+                      disabled: voice.phase === 'idle' && !voiceCatalogUsable(voiceCatalog),
                       onClick: function () {
                         if (voice.phase === 'recording') stopVoice()
                         else if (voice.phase === 'idle') startVoice()
@@ -3616,7 +3724,7 @@
                 ),
               )
             : null,
-          searchable
+          searchVisible
             ? h(
                 'div',
                 { className: 'dsn-search', role: 'search' },
@@ -3709,7 +3817,7 @@
                       (voice.phase === 'recording' && voiceTargetRef.current === 'search' ? ' is-recording' : ''),
                     title: voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
                     'aria-label': voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
-                    disabled: voice.phase === 'idle' && (!voiceCatalog || voiceCatalog.available !== true),
+                    disabled: voice.phase === 'idle' && !voiceCatalogUsable(voiceCatalog),
                     onClick: function () {
                       if (voice.phase === 'recording') stopVoice()
                       else if (voice.phase === 'idle') startVoice('search')
@@ -3820,19 +3928,34 @@
             ? h(
                 'div',
                 {
-                  className: 'dsn-toast' + (undoState.kind === 'error' ? ' is-error' : ''),
-                  role: undoState.kind === 'error' ? 'alert' : 'status',
-                  'aria-live': undoState.kind === 'error' ? 'assertive' : 'polite',
+                  className: 'dsn-toast' + (undoState.kind === 'error' || undoState.kind === 'voice-retry' ? ' is-error' : ''),
+                  role: undoState.kind === 'error' || undoState.kind === 'voice-retry' ? 'alert' : 'status',
+                  'aria-live': undoState.kind === 'error' || undoState.kind === 'voice-retry' ? 'assertive' : 'polite',
                 },
                 h('span', { className: 'dsn-toast-text' }, toastText(undoState)),
-                undoState.kind === 'error' || undoState.kind === 'info'
-                  ? null
-                  : h(
+                undoState.kind === 'voice-retry'
+                  ? h(
                       'button',
-                      { type: 'button', className: 'dsn-toast-undo', onClick: undoAction },
-                      IconUndo(13),
-                      h('span', null, t('toast.undo')),
-                    ),
+                      {
+                        type: 'button',
+                        className: 'dsn-toast-undo',
+                        onClick: function () {
+                          var target = undoState.target
+                          setUndoState(null)
+                          startVoice(target)
+                        },
+                      },
+                      IconMic(13),
+                      h('span', null, t('voice.retry')),
+                    )
+                  : undoState.kind === 'error' || undoState.kind === 'info'
+                    ? null
+                    : h(
+                        'button',
+                        { type: 'button', className: 'dsn-toast-undo', onClick: undoAction },
+                        IconUndo(13),
+                        h('span', null, t('toast.undo')),
+                      ),
               )
             : null,
         )
@@ -3948,6 +4071,7 @@
         '.dsn-search-clear{width:24px;height:24px;border-radius:6px}',
         '.dsn-search-voice{width:24px;height:24px;border-radius:6px}',
         '.dsn-search-voice.is-recording{color:var(--dsw-alias-state-error-primary,#e5484d)}',
+        '.dsn-head-voice.is-recording{color:var(--dsw-alias-state-error-primary,#e5484d)}',
         '.dsn-filter{display:flex;gap:6px;margin:0 14px 8px}',
         '.dsn-filter-btn{display:inline-flex;align-items:center;gap:5px;min-height:26px;padding:3px 11px;border:1px solid var(--dsn-line);border-radius:999px;background:transparent;color:var(--dsn-fg-2);font:inherit;font-size:11.5px;font-variant-numeric:tabular-nums;cursor:pointer;transition:background .12s ease,color .12s ease}',
         '.dsn-filter-btn:hover{background:rgba(127,127,127,.12);color:var(--dsn-fg)}',
@@ -3958,6 +4082,9 @@
         '.dsn-voice{display:flex;align-items:center;gap:8px;min-height:34px;padding:4px 6px 4px 10px;border:1px dashed var(--dsn-line);border-radius:9px;background:rgba(127,127,127,.06);color:var(--dsn-fg-2);font-size:11.5px}',
         '.dsn-voice-dot{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:var(--dsw-alias-state-error-primary,#e5484d);animation:dsn-pulse 1.1s ease-in-out infinite}',
         '.dsn-voice-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        // 录音电平条：只反映音量，不承载语义；读屏用户听「录音中」状态行即可。
+        '.dsn-voice-level{flex:0 0 auto;width:44px;height:6px;border-radius:3px;background:rgba(127,127,127,.22);overflow:hidden}',
+        '.dsn-voice-level-fill{display:block;height:100%;width:0;border-radius:3px;background:var(--dsn-accent);transition:width .15s linear}',
         '.dsn-voice-btn{display:grid;place-items:center;width:26px;height:26px;flex:0 0 auto;padding:0;border:0;border-radius:7px;background:transparent;color:var(--dsn-fg-2);cursor:pointer}',
         '.dsn-voice-btn:hover{background:rgba(127,127,127,.18);color:var(--dsn-fg)}',
         '.dsn-voice-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',

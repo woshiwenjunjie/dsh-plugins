@@ -67,6 +67,8 @@ let voiceTranscribePayload = { ok: true, text: '语音识别出的文本', audio
 let voiceFetchCalls = []
 let micError = null
 let micStreamStopped = 0
+// 假麦克风电平：模拟「说话」0.4 / 静音 0，用来测电平条和静音自动停。
+let fakeVoiceLevel = 0
 // 组件收到的 props：真环境里是 slot 的标准 kit（含 useSessions），测试里可以模拟。
 let runtimeProps = {}
 // 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
@@ -238,9 +240,23 @@ function emitTree(node) {
 }
 
 // 语音：假音频管线（不解码真音频，只保证「录音 → 重采样 → WAV → base64」状态机跑通）。
+class FakeAnalyser {
+  constructor() {
+    this.fftSize = 256
+  }
+  getFloatTimeDomainData(target) {
+    for (let i = 0; i < target.length; i += 1) target[i] = fakeVoiceLevel
+  }
+}
 class FakeAudioContext {
   constructor() {
     this.state = 'running'
+  }
+  createAnalyser() {
+    return new FakeAnalyser()
+  }
+  createMediaStreamSource() {
+    return { connect() {} }
   }
   decodeAudioData() {
     return Promise.resolve({ duration: 2 })
@@ -1872,6 +1888,93 @@ check('catalog 不可用时语音搜索禁用', Boolean(voiceSearchButton() && v
 voiceCatalogPayload = READY_VOICE_CATALOG
 voiceTranscribePayload = previousVoiceTranscribe
 
+// ---------------------------------------------------------------- 语音完善（真机反馈）
+//
+// ① 旧 Host 只把 ready 算 available，standby 被误判成未就绪 → 客户端兜住；
+// ② 手动点停止不方便 → 说完静音 1.8s 自动停 + 电平条 + 剩余秒数；
+// ③ 语音搜索入口太深 → 头部常驻麦克风；
+// ④ 失败后给「重试」，不用重新找入口。
+
+// ① standby 兼容
+voiceCatalogPayload = {
+  ok: true,
+  catalog: {
+    available: false,
+    reason: 'not-ready',
+    providerId: 'sensevoice-local',
+    location: 'host-local',
+    preparation: 'standby',
+    language: 'auto',
+    limits: { maxDurationSeconds: 60, maxAudioBytes: 2 * 1024 * 1024 },
+  },
+}
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+const standbyEntry = menuItems()[4]
+check('standby 不会把语音入口禁用（客户端兼容旧 Host）', Boolean(standbyEntry && standbyEntry.props.disabled), false)
+pressKey({ key: 'Escape' })
+voiceCatalogPayload = READY_VOICE_CATALOG
+
+// ② 电平 + 剩余秒数 + 静音自动停
+storage.delete('dsh-sticky-notes:draft')
+voiceTranscribePayload = { ok: true, text: '自动停下来的结果', audioSeconds: 1, inferenceSeconds: 0.05 }
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+act(() => menuItems()[4].props.onClick())
+await settleVoice()
+fakeVoiceLevel = 0.4
+advance(400)
+check('录音行显示剩余秒数', String(flattenText(voiceRow())).indexOf('剩余') !== -1, true)
+const levelFill = elements.find((el) => el.props.className === 'dsn-voice-level-fill')
+check('录音行有电平条且随音量变化', Boolean(levelFill) && String(levelFill.props.style.width) === '40%', true)
+fakeVoiceLevel = 0
+advance(2500)
+await settleVoice()
+check('说完静音 1.8 秒自动停止并转写', draftArea().props.value, '自动停下来的结果')
+
+// ③ 头部语音搜索入口 + 去尾部标点
+storage.delete('dsh-sticky-notes:draft')
+voiceTranscribePayload = { ok: true, text: '已有。', audioSeconds: 1, inferenceSeconds: 0.05 }
+remount(voiceSeed)
+await settleVoice()
+const headVoice = elements.find((el) => String(el.props.className || '').indexOf('dsn-head-voice') !== -1)
+check('便签很少时头部也有语音搜索按钮', Boolean(headVoice), true)
+check('默认没有搜索框', Boolean(searchInput()), false)
+act(() => {
+  if (headVoice) headVoice.props.onClick()
+})
+await settleVoice()
+check('语音搜索时临时出现搜索框', Boolean(searchInput()), true)
+act(() => {
+  if (voiceStopButton()) voiceStopButton().props.onClick()
+})
+await settleVoice()
+check('头部语音搜索直接筛（去掉尾部标点）', searchInput() ? searchInput().props.value : null, '已有')
+check('搜索命中已有便签', shownTexts(), ['已有的一条'])
+
+// ④ 失败后重试
+micError = { name: 'NotAllowedError' }
+storage.delete('dsh-sticky-notes:draft')
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+act(() => menuItems()[4].props.onClick())
+await settleVoice()
+const retryBtn = elements.find(
+  (el) => el.type === 'button' && el.props.className === 'dsn-toast-undo' && String(flattenText(el.props.children)).indexOf('重试') !== -1,
+)
+check('失败提示带「重试」按钮', Boolean(retryBtn), true)
+micError = null
+act(() => {
+  if (retryBtn) retryBtn.props.onClick()
+})
+await settleVoice()
+check('点重试后重新进入录音态', Boolean(voiceRow()), true)
+pressKey({ key: 'Escape' })
+voiceTranscribePayload = previousVoiceTranscribe
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -1880,5 +1983,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）',
 )

@@ -190,6 +190,8 @@ else {
     if (css.indexOf('.dsn-voice{') === -1) problems.push('缺少语音录音状态行样式')
     if (css.indexOf('.dsn-voice-mic') === -1) problems.push('缺少草稿框语音按钮样式')
     if (css.indexOf('.dsn-search-voice') === -1) problems.push('缺少搜索框语音按钮样式')
+    if (css.indexOf('.dsn-head-voice') === -1) problems.push('缺少头部语音搜索按钮样式')
+    if (css.indexOf('.dsn-voice-level-fill') === -1) problems.push('缺少录音电平条样式')
   }
   if (!registered) problems.push('没有注册任何 slot 组件')
   else {
