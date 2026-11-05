@@ -334,6 +334,51 @@
         return { notes: sortNotes(merged), added: added, updated: updated }
       }
 
+      /** 两份便签列表是否完全一样：用来判断「本页还有没有没落盘的改动」。 */
+      function sameNoteList(a, b) {
+        return JSON.stringify(a || []) === JSON.stringify(b || [])
+      }
+
+      /**
+       * 另一页刚写完 notes，而本页也有还没落盘的改动：整份替换会把这页正在打的字冲掉，
+       * 所以按 id 判断谁动过，再合并：
+       * - 本页动过（和上次落盘快照不同）：保本页；
+       * - 本页没动、另一页改过：用另一页的；
+       * - 本页没动、另一页删掉：跟着删；
+       * - 另一页新增：加进来；本页刚删掉的：不跟着复活。
+       * 代价：同一 id 两边同时改是「后落盘的赢」（和原来整份覆盖一致），
+       * 本页正在编辑的那条被另一页删掉时，删除要等本页落盘后才生效。
+       */
+      function mergeIncomingNotes(local, saved, incoming) {
+        var localById = {}
+        var savedById = {}
+        var incomingById = {}
+        var merged = []
+        var i
+        for (i = 0; i < local.length; i += 1) localById[local[i].id] = local[i]
+        for (i = 0; i < saved.length; i += 1) savedById[saved[i].id] = saved[i]
+        for (i = 0; i < incoming.length; i += 1) incomingById[incoming[i].id] = incoming[i]
+        for (i = 0; i < local.length; i += 1) {
+          var note = local[i]
+          var before = savedById[note.id]
+          var dirty = !before || JSON.stringify(before) !== JSON.stringify(note)
+          if (dirty) {
+            merged.push(note)
+            continue
+          }
+          var theirs = incomingById[note.id]
+          if (theirs) merged.push(theirs)
+        }
+        for (i = 0; i < incoming.length; i += 1) {
+          var extra = incoming[i]
+          if (localById[extra.id]) continue
+          // 本页删掉的（上次落盘时还在、现在没了）不跟着另一页复活。
+          if (savedById[extra.id]) continue
+          merged.push(extra)
+        }
+        return merged
+      }
+
       /** 导出文件名：sticky-notes-20261104-1936.md / .json */
       function stampFilename(extension) {
         var stamp = new Date()
@@ -439,9 +484,12 @@
       var CLIP_REJECT = 8000
       var CLIP_PREVIEW = 30
 
+      // 只清真正的零宽垃圾（ZWSP / BOM）。ZWNJ(\u200c) / ZWJ(\u200d) 是语义连接符，
+      // 不能当垃圾删：删掉 ZWJ 会把「👨‍👩‍👧」拆成三个 emoji，删掉 ZWNJ 会把
+      // 波斯语/印地语单词改成另一个词（میروم → میروم）。用户粘什么就该记什么。
       function cleanClipText(raw) {
         return String(raw == null ? '' : raw)
-          .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+          .replace(/[\u200b\ufeff]/g, '')
           .replace(/\r\n?/g, '\n')
           .trim()
       }
@@ -1265,9 +1313,10 @@
 
       function NoteCard(props) {
         var note = props.note
-        var tick = props.tick
+        // 相对时间文案由父组件算好传进来。别传 tick：tick 每 30 秒变一次，
+        // 传下来会让 300 张卡片的 memo 全部失效；传字符串则只有文案真变了的那几张重渲染。
+        var timeText = props.timeText
         var t = props.t
-        var timeLabels = props.timeLabels
         var onChange = props.onChange
         var onCommit = props.onCommit
         var onRemove = props.onRemove
@@ -1410,7 +1459,7 @@
           h(
             'div',
             { className: 'dsn-note-foot' },
-            h('span', { className: 'dsn-time', title: new Date(note.updatedAt).toLocaleString() }, formatTime(note.updatedAt, tick, timeLabels)),
+            h('span', { className: 'dsn-time', title: new Date(note.updatedAt).toLocaleString() }, timeText),
             note.pinned && !archived ? h('span', { className: 'dsn-pin-mark' }, t('note.pinned')) : null,
             archived ? h('span', { className: 'dsn-archived-mark' }, t('filter.archived')) : null,
             // 来源会话：Windows 便签「自动记录来源」的对应物，只不过我们记的是会话 id，
@@ -1599,6 +1648,9 @@
         var searchRecorded = useRef(false)
         // 最新一份状态，供「刷新/卸载前补写」这类拿不到闭包的路径读取。
         var latestStore = useRef(store)
+        // 上一次成功落盘（或从另一页读进来）的那一份列表。
+        // 和它比才知道哪些 id 是「本页还没落盘的改动」——多标签页合并全靠这个判断。
+        var lastSavedNotes = useRef(store.notes)
         // 语言切换时重渲染一次，让 t() 重新绑定当前语言。
         var [localeTick, setLocaleTick] = useState(0)
 
@@ -1791,7 +1843,12 @@
             setDirty(true)
             if (saveTimer.current) window.clearTimeout(saveTimer.current)
             saveTimer.current = window.setTimeout(function () {
-              var ok = writeNotes(latestStore.current.notes)
+              // 定时器 id 归零：避免 flushNow 去清一个已经到期的定时器。
+              saveTimer.current = 0
+              var snapshot = latestStore.current.notes
+              var ok = writeNotes(snapshot)
+              // 只有真写进去才更新快照：多标签页合并靠它判断哪些 id 还没落盘。
+              if (ok) lastSavedNotes.current = snapshot
               setDirty(false)
               setSaveFailed(!ok)
             }, SAVE_DEBOUNCE_MS)
@@ -1825,7 +1882,10 @@
               window.clearTimeout(saveTimer.current)
               saveTimer.current = 0
             }
-            if (!writeNotes(latestStore.current.notes)) setSaveFailed(true)
+            var snapshot = latestStore.current.notes
+            var ok = writeNotes(snapshot)
+            if (ok) lastSavedNotes.current = snapshot
+            else setSaveFailed(true)
           }
           window.addEventListener('pagehide', flushNow)
           window.addEventListener('beforeunload', flushNow)
@@ -1837,16 +1897,29 @@
         }, [])
 
         // 多标签页/多窗口同步：另一个页面改了便签，这边跟着刷新内容（不动面板开合）。
+        // 关键：本页可能正打着字、还没到 300ms 的落盘点，这时整份替换会把本页的字冲掉。
+        // 所以先看本页有没有未落盘的改动：没有就整份采用；有就按 id 合并（见 mergeIncomingNotes）。
         useEffect(function () {
           function onStorage(event) {
             if (event.key !== STORAGE_KEY) return
-            var next = readNotes()
+            var incoming = readNotes()
+            var local = latestStore.current.notes
+            if (sameNoteList(local, lastSavedNotes.current)) {
+              // 本页干净：直接采用另一页的版本（和原来的行为一致）。
+              if (sameNoteList(local, incoming)) return
+              lastSavedNotes.current = incoming
+              setStore(function (prev) {
+                return { notes: incoming, open: prev.open }
+              })
+              setDirty(false)
+              return
+            }
+            // 本页有还没落盘的改动：合并，保住本页正在打的内容（别整份覆盖）。
+            var merged = mergeIncomingNotes(local, lastSavedNotes.current, incoming)
+            if (sameNoteList(merged, local)) return
             setStore(function (prev) {
-              // 内容一致就不更新：否则两边会互相回写同一个 key。
-              if (JSON.stringify(prev.notes) === JSON.stringify(next)) return prev
-              return { notes: next, open: prev.open }
+              return sameNoteList(prev.notes, merged) ? prev : { notes: merged, open: prev.open }
             })
-            setDirty(false)
           }
           window.addEventListener('storage', onStorage)
           return function () {
@@ -1911,6 +1984,10 @@
             if (!open) return undefined
             function onKeyDown(event) {
               if (event.key === 'Escape') {
+                // 输入法组词中的 Esc 是「取消候选」，不是「退出面板」：别拦、别清搜索词、也别收面板。
+                // 只判 isComposing 不够——Safari 常在 compositionend 之后才发结束组词的那次 keydown，
+                // 所以 keyCode 229 一起判（和草稿框 Ctrl+Enter 那处同一个坑）。
+                if (event.isComposing || event.keyCode === 229) return
                 event.stopPropagation()
                 if (menuOpen) {
                   setMenuOpen(false)
@@ -2067,7 +2144,8 @@
             return { notes: [note].concat(prev.notes).slice(0, MAX_NOTES), open: true }
           })
           setDraft('')
-          setTick(now)
+          // 不 setTick：tick 一变所有卡片的 memo 都会失效，300 条时要白画 300 张卡。
+          // 新便签的 updatedAt 就是现在，用 30 秒心跳的旧 tick 算出来仍然是「刚刚」。
           recordMetric('create')
           recordLengthMetric(value)
         }, [activeSessionId])
@@ -2149,7 +2227,7 @@
             setStore(function (prev) {
               return { notes: [note].concat(prev.notes).slice(0, MAX_NOTES), open: true }
             })
-            setTick(now)
+            // 不 setTick：理由同上，记一条不该让整个列表重画。
             recordMetric('create')
             recordLengthMetric(value)
             recordMetric('clipboard')
@@ -2961,9 +3039,9 @@
                   var cardProps = {
                     key: note.id,
                     note: note,
-                    tick: tick,
+                    // 相对时间在父组件一次算好：30 秒心跳到点时，文案没变的卡片 memo 得掉。
+                    timeText: formatTime(note.updatedAt, tick, timeLabels),
                     t: t,
-                    timeLabels: timeLabels,
                     query: query,
                     editing: editingId === note.id,
                     onStartEdit: startEdit,

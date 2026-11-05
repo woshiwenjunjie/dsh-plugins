@@ -42,6 +42,7 @@ let pendingEffects = []
 // 虚拟时钟 + 宏任务队列：定时器只在 advance(ms) 之后才到期，
 // 这样「5 秒撤销窗口」和「300ms 去抖落盘」都能被测到，而不是一调度就被执行掉。
 let clock = 0
+let sandboxNow = Date.now()
 let timers = new Map()
 let timerSeq = 0
 let focusedElement = null
@@ -238,8 +239,14 @@ const sandbox = {
       },
     },
     innerWidth: 1400,
-    setInterval: () => 0,
-    clearInterval: () => {},
+    setInterval: (fn, delay) => {
+      timerSeq += 1
+      timers.set(timerSeq, { fn, at: clock + (typeof delay === 'number' ? delay : 0), every: typeof delay === 'number' ? delay : 0 })
+      return timerSeq
+    },
+    clearInterval: (id) => {
+      timers.delete(id)
+    },
     setTimeout: (fn, delay) => {
       timerSeq += 1
       timers.set(timerSeq, { fn, at: clock + (typeof delay === 'number' ? delay : 0) })
@@ -259,6 +266,13 @@ const sandbox = {
     removeEventListener: removeDocumentListener,
     querySelector: (selector) =>
       selector === '[data-dsh-sidebar-root]' ? { getBoundingClientRect: () => ({ right: 248 }) } : null,
+  },
+  // 组件里所有 Date.now() 都跟着虚拟时钟走：这样「30 秒心跳」「打开一会儿再记下」
+  // 这类相对时间相关路径才能被测到，而不是依赖真机上两毫秒的差。
+  Date: class VirtualDate extends Date {
+    static now() {
+      return sandboxNow + clock
+    }
   },
   Blob: class Blob {
     constructor(parts, options) {
@@ -356,6 +370,8 @@ function flush() {
       for (const [id, timer] of dueTimers()) {
         timers.delete(id)
         timer.fn()
+        // setInterval 的替身：跑完再按同一周期挂回去（相对时间 30 秒心跳要用）。
+        if (timer.every > 0) timers.set(id, { fn: timer.fn, at: timer.at + timer.every, every: timer.every })
       }
     }
   }
@@ -393,6 +409,18 @@ function dispatchPaste({ target = null, text = '' } = {}) {
   for (const listener of (documentListeners.get('paste') || []).slice()) listener(event)
   flush()
   return event
+}
+
+/** 派发一次 window storage 事件：模拟「另一个标签页刚写完 notes」。 */
+function dispatchStorage() {
+  for (const listener of (windowListeners.get('storage') || []).slice()) listener({ key: 'dsh-sticky-notes:v1' })
+  flush()
+}
+function writeStorageNotes(list) {
+  storage.set('dsh-sticky-notes:v1', JSON.stringify({ notes: list }))
+}
+function noteButtons(className) {
+  return elements.filter((el) => el.type === 'button' && el.props.className === className)
 }
 
 function cards() {
@@ -1201,14 +1229,31 @@ check(
 act(() => colorMenuItems()[1].props.onClick({}))
 check('再按颜色收窄到一条', shownTexts(), ['#想法 玫瑰那条'])
 
+// 输入法组词中按 Esc 是「取消候选」，不能当成退出面板 / 清搜索词
+function searchValue() {
+  const input = searchInput()
+  return input ? input.props.value : null
+}
+pressKey({ key: 'Escape', isComposing: true })
+check('组词中 Esc 不收起面板', elements.some((el) => el.props.className === 'dsn-panel'), true)
+check('组词中 Esc 不清搜索词', searchValue(), '#想法')
+pressKey({ key: 'Escape', isComposing: false, keyCode: 229 })
+check('Safari 式 keyCode 229 的 Esc 也不清搜索词', searchValue(), '#想法')
+
 // Esc 逐层退出：先清搜索词，再清颜色筛选，最后才收面板（与 Esc 链的顺序一致）
 pressKey({ key: 'Escape' })
-check('Esc 先清搜索词', searchInput().props.value, '')
+check('Esc 先清搜索词', searchValue(), '')
 check('清掉搜索后颜色筛选仍生效', shownTexts(), ['#想法 玫瑰那条'])
 pressKey({ key: 'Escape' })
 check('Esc 再清颜色筛选', shownTexts().length, 5)
 pressKey({ key: 'Escape' })
 check('Esc 最后才收面板', elements.some((el) => el.props.className === 'dsn-panel'), false)
+
+// 没有搜索词时，组词中 Esc 会不会把面板整个收掉（这是更常见的中文输入场景）
+pressKey({ altKey: true, shiftKey: true, key: 'N' })
+check('重新展开面板（Esc 用例收尾）', elements.some((el) => el.props.className === 'dsn-panel'), true)
+pressKey({ key: 'Escape', isComposing: true })
+check('组词中 Esc 不收起面板（无搜索词时）', elements.some((el) => el.props.className === 'dsn-panel'), true)
 
 // 切视图芯片会清掉颜色筛选（否则点「已归档」看起来没反应）
 remount(colorSeed)
@@ -1392,6 +1437,86 @@ act(() => menuButton().props.onClick({}))
 await actAsync(() => menuItems()[3].props.onClick({}))
 check('空剪贴板给明确提示', toastEl() && toastEl().props.children[0].props.children, '剪贴板里没有文字')
 
+// 10. 内容保真：ZWJ / ZWNJ 是「语义连接符」，不是零宽垃圾。
+//     删 ZWJ 会把 👨‍👩‍👧 拆成三个独立 emoji；删 ZWNJ 会把波斯语单词改成另一个词。
+const family = '👨\u200d👩\u200d👧'
+const persian = 'می\u200cخواهم'
+clipboardText = '家人 ' + family + ' 和 ' + persian
+dispatchPaste({ target: panelEl(), text: clipboardText })
+check('组合 emoji 保持完整（ZWJ 没被删）', cardTexts()[0], clipboardText)
+check('波斯语 ZWNJ 没被删', cardTexts()[0].indexOf('\u200c') !== -1, true)
+
+// 真正的零宽垃圾（ZWSP / BOM）仍然清掉
+clipboardText = '\u200b\u200b带零宽空格的句子\ufeff'
+dispatchPaste({ target: panelEl(), text: clipboardText })
+check('零宽空格 / BOM 仍然清掉', cardTexts()[0], '带零宽空格的句子')
+
+// ---------------------------------------------------------------- 多标签页同步
+//
+// 另一个标签页写入时会派发 window 的 storage 事件。本页可能正打着字（300ms 去抖还没落盘），
+// 此时整份替换会把这页的字冲掉，所以必须按 id 合并：保本页改动、收别处新增、跟别处删除，
+// 但本页刚删掉的不被别处复活。
+
+const multiSeed = [
+  { id: 'mt1', text: '本页正在写的', color: 'amber', pinned: false, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'mt2', text: '别处会改的', color: 'sky', pinned: false, createdAt: now - 3000, updatedAt: now - 3000 },
+]
+remount(multiSeed)
+act(() => cards()[0].props.onChange({ target: { value: '本页正在写的（打到一半）' } }))
+
+// 另一个标签页：改了 mt2、加了 mt3，然后落盘并派发 storage（它没见过本页刚打的字）
+const remoteSnapshot = [
+  { id: 'mt1', text: '本页正在写的', color: 'amber', pinned: false, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'mt2', text: '别处改过的', color: 'sky', pinned: false, createdAt: now - 3000, updatedAt: now - 100 },
+  { id: 'mt3', text: '别处新增的', color: 'mint', pinned: false, createdAt: now - 50, updatedAt: now - 50 },
+]
+writeStorageNotes(remoteSnapshot)
+dispatchStorage()
+check('多标签页：本页未落盘的编辑还在', cardTexts().indexOf('本页正在写的（打到一半）') !== -1, true)
+check('多标签页：别处新增的便签收进来', cardTexts().indexOf('别处新增的') !== -1, true)
+check('多标签页：本页没动的便签跟着别处更新', cardTexts().indexOf('别处改过的') !== -1, true)
+
+advance(300)
+const syncedNotes = JSON.parse(storage.get('dsh-sticky-notes:v1')).notes
+check('合并结果落盘（本页编辑 + 别处新增都在）', syncedNotes.map((note) => note.text).sort(), ['本页正在写的（打到一半）', '别处改过的', '别处新增的'].sort())
+
+// 本页刚删掉一条（还没落盘），别页快照里还有它：不能被复活
+const deletedIndex = cardTexts().indexOf('别处改过的')
+act(() => noteButtons('dsn-icon-btn dsn-del')[deletedIndex].props.onClick())
+check('删除立即生效', cardTexts().indexOf('别处改过的'), -1)
+writeStorageNotes(remoteSnapshot)
+dispatchStorage()
+check('多标签页：本页刚删掉的便签不被别页复活', cardTexts().indexOf('别处改过的'), -1)
+advance(300)
+check('删除也落盘了', JSON.parse(storage.get('dsh-sticky-notes:v1')).notes.some((note) => note.id === 'mt2'), false)
+
+// 本页没有未落盘改动时，仍然直接采用别页版本（别页的新增/修改不会被挡住）
+remount(multiSeed)
+advance(300)
+writeStorageNotes([{ id: 'mt9', text: '另一页新增的', color: 'rose', pinned: false, createdAt: now, updatedAt: now }])
+dispatchStorage()
+check('本页干净时直接采用别页版本', cardTexts(), ['另一页新增的'])
+
+// ---------------------------------------------------------------- 渲染优化：tick 不进卡片 props
+//
+// 以前 tick 作为卡片 prop：每 30 秒心跳、以及每次「记下」都会让所有卡片的 memo 失效。
+// 现在父组件把相对时间算成字符串传下去：文案没变的卡片不重画。
+
+const tickSeed = [
+  { id: 'p1', text: '三小时前写的', color: 'amber', pinned: false, createdAt: now - 3 * 3600 * 1000 - 5000, updatedAt: now - 3 * 3600 * 1000 - 5000 },
+  { id: 'p2', text: '五小时前写的', color: 'sky', pinned: false, createdAt: now - 5 * 3600 * 1000, updatedAt: now - 5 * 3600 * 1000 },
+]
+remount(tickSeed)
+// 模拟「面板开了一会儿再记下」：让 tick 和此刻真的差 2 秒（旧代码会在这里 setTick(now)，
+// 于是所有卡片的 tick prop 都变、memo 全失效；新代码不该再触发列表重画）。
+advance(2000)
+act(() => draftArea().props.onChange({ target: { value: '再记一条' } }))
+act(() => draftArea().props.onKeyDown({ nativeEvent: { isComposing: false }, ctrlKey: true, key: 'Enter', preventDefault() {} }))
+check('记下一条只重渲染新卡片（其余 memo 命中）', maxPassCardRenders, 1)
+maxPassCardRenders = 0
+advance(30000)
+check('30 秒心跳不会让时间文案没变的卡片重渲染', maxPassCardRenders, 0)
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -1400,5 +1525,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）',
 )
