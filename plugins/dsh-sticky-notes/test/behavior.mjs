@@ -1813,6 +1813,65 @@ check('Esc 取消录音后状态行消失', Boolean(voiceRow()), false)
 check('Esc 取消时释放麦克风', micStreamStopped > 0, true)
 check('Esc 取消后不发转写请求', voiceFetchTargets().filter((url) => url.indexOf('/voice/transcribe') !== -1).length, transcribeBeforeCancel)
 
+// ---------------------------------------------------------------- 语音搜索（2b）
+//
+// 拍板：转写直接填搜索框并立即筛。搜索框只在便签 ≥ 6 条时出现，麦克风跟着它一起出现。
+
+const voiceSearchSeed = [
+  { id: 'vs1', text: '语音筛出来的想法', color: 'amber', pinned: false, createdAt: now - 6000, updatedAt: now - 6000 },
+  { id: 'vs2', text: '买咖啡豆', color: 'sky', pinned: false, createdAt: now - 5000, updatedAt: now - 5000 },
+  { id: 'vs3', text: '周五复盘提纲', color: 'mint', pinned: false, createdAt: now - 4000, updatedAt: now - 4000 },
+  { id: 'vs4', text: '给妈妈打电话', color: 'rose', pinned: false, createdAt: now - 3000, updatedAt: now - 3000 },
+  { id: 'vs5', text: '读《卡片笔记法》', color: 'violet', pinned: false, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'vs6', text: '周三前交稿', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+]
+
+function voiceSearchButton() {
+  return elements.find((el) => el.props.className && String(el.props.className).indexOf('dsn-search-voice') !== -1)
+}
+
+const previousVoiceTranscribe = voiceTranscribePayload
+voiceTranscribePayload = { ok: true, text: '语音筛出来的想法', audioSeconds: 1, inferenceSeconds: 0.05 }
+storage.delete('dsh-sticky-notes:draft')
+remount(voiceSearchSeed)
+await settleVoice()
+check('便签够多时搜索框带语音搜索按钮', Boolean(voiceSearchButton()), true)
+
+act(() => {
+  if (voiceSearchButton()) voiceSearchButton().props.onClick()
+})
+await settleVoice()
+check('语音搜索进入录音态', Boolean(voiceRow()), true)
+act(() => {
+  if (voiceStopButton()) voiceStopButton().props.onClick()
+})
+await settleVoice()
+check('语音搜索把转写填进搜索框', searchInput().props.value, '语音筛出来的想法')
+check('语音搜索立即筛出结果', shownTexts(), ['语音筛出来的想法'])
+check('语音搜索不往草稿里写', draftArea().props.value, '')
+
+// Esc 取消语音搜索：不留状态
+remount(voiceSearchSeed)
+await settleVoice()
+act(() => {
+  if (voiceSearchButton()) voiceSearchButton().props.onClick()
+})
+await settleVoice()
+pressKey({ key: 'Escape' })
+check('Esc 取消语音搜索后状态行消失', Boolean(voiceRow()), false)
+check('取消后搜索框仍为空', searchInput() ? searchInput().props.value : null, '')
+
+// catalog 不可用时语音搜索禁用（和语音输入同一道闸门）
+voiceCatalogPayload = {
+  ok: true,
+  catalog: { available: false, reason: 'no-service', providerId: '', location: '', preparation: '', language: 'auto', limits: { maxDurationSeconds: 60, maxAudioBytes: 2 * 1024 * 1024 } },
+}
+remount(voiceSearchSeed)
+await settleVoice()
+check('catalog 不可用时语音搜索禁用', Boolean(voiceSearchButton() && voiceSearchButton().props.disabled), true)
+voiceCatalogPayload = READY_VOICE_CATALOG
+voiceTranscribePayload = previousVoiceTranscribe
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -1821,5 +1880,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）',
 )

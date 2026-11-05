@@ -670,6 +670,7 @@
         'voice.stop': '停止录音',
         'voice.cancel': '取消录音',
         'voice.mic': '语音记一条',
+        'voice.search': '语音搜索',
         'voice.done': '已识别，检查一下再按 Ctrl+Enter',
         'voice.permission': '没有麦克风权限，请在系统/浏览器里允许后重试',
         'voice.deviceMissing': '找不到麦克风设备',
@@ -793,6 +794,7 @@
         'voice.stop': 'Stop recording',
         'voice.cancel': 'Cancel recording',
         'voice.mic': 'Dictate a note',
+        'voice.search': 'Voice search',
         'voice.done': 'Recognized — review, then press Ctrl+Enter',
         'voice.permission': 'Microphone permission is blocked. Allow it, then retry.',
         'voice.deviceMissing': 'No microphone found',
@@ -1880,6 +1882,8 @@
         // 语音录音会话（麦克风/recorder/定时器/音频上下文）与正在进行的转写请求。
         var voiceRef = useRef(null)
         var voiceAbortRef = useRef(null)
+        // 这次录音的落点：'draft'（语音记一条）或 'search'（语音搜索，转写直接填搜索框并立即筛）。
+        var voiceTargetRef = useRef('draft')
         // 埋点去抖：同一条便签一次会话里只记一次「编辑」，搜索一次会话只记一次。
         var editedInSession = useRef({})
         // 这条便签自上次失焦后有没有被真的改过：只有改过才更新排序时间。
@@ -2067,13 +2071,14 @@
           return t('voice.failed')
         }
 
-        /** 开始录音：拿麦克风 → MediaRecorder → 计时 + 60 秒自动停。 */
-        function startVoice() {
+        /** 开始录音：拿麦克风 → MediaRecorder → 计时 + 60 秒自动停。target：draft / search。 */
+        function startVoice(target) {
           if (voiceRef.current || voice.phase !== 'idle') return
           if (!voiceCatalog || voiceCatalog.available !== true) {
             showToast({ kind: 'error', text: voiceReasonText(voiceCatalog && voiceCatalog.reason) }, 4000)
             return
           }
+          voiceTargetRef.current = target === 'search' ? 'search' : 'draft'
           var nav = typeof navigator !== 'undefined' ? navigator : null
           if (!nav || !nav.mediaDevices || typeof nav.mediaDevices.getUserMedia !== 'function' || typeof MediaRecorder === 'undefined') {
             showToast({ kind: 'error', text: t('voice.unavailable') }, 4000)
@@ -2177,7 +2182,20 @@
                 finishVoiceFailure(session, 'empty')
                 return
               }
-              insertVoiceText(text)
+              if (text) {
+                if (voiceTargetRef.current === 'search') {
+                  // 语音搜索：转写直接填进搜索框并立即筛（拍板：说完就看结果）。
+                  setQuery(text)
+                  var searchNode = searchRef.current
+                  if (searchNode && typeof searchNode.focus === 'function') searchNode.focus()
+                  if (!searchRecorded.current) {
+                    searchRecorded.current = true
+                    recordMetric('search')
+                  }
+                } else {
+                  insertVoiceText(text)
+                }
+              }
               if (voiceRef.current === session) voiceRef.current = null
               disposeVoiceSession(session)
               setVoice({ phase: 'idle', elapsed: 0 })
@@ -3681,6 +3699,24 @@
                     }
                   },
                 }),
+                // 语音搜索：转写直接填搜索框并立即筛；provider 不可用时禁用并说明。
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className:
+                      'dsn-icon-btn dsn-search-voice' +
+                      (voice.phase === 'recording' && voiceTargetRef.current === 'search' ? ' is-recording' : ''),
+                    title: voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
+                    'aria-label': voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
+                    disabled: voice.phase === 'idle' && (!voiceCatalog || voiceCatalog.available !== true),
+                    onClick: function () {
+                      if (voice.phase === 'recording') stopVoice()
+                      else if (voice.phase === 'idle') startVoice('search')
+                    },
+                  },
+                  voice.phase === 'recording' && voiceTargetRef.current === 'search' ? IconStop(14) : IconMic(14),
+                ),
                 query
                   ? h(
                       'button',
@@ -3910,6 +3946,8 @@
         '.dsn-search-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
         '.dsn-search-input::-webkit-search-cancel-button{display:none}',
         '.dsn-search-clear{width:24px;height:24px;border-radius:6px}',
+        '.dsn-search-voice{width:24px;height:24px;border-radius:6px}',
+        '.dsn-search-voice.is-recording{color:var(--dsw-alias-state-error-primary,#e5484d)}',
         '.dsn-filter{display:flex;gap:6px;margin:0 14px 8px}',
         '.dsn-filter-btn{display:inline-flex;align-items:center;gap:5px;min-height:26px;padding:3px 11px;border:1px solid var(--dsn-line);border-radius:999px;background:transparent;color:var(--dsn-fg-2);font:inherit;font-size:11.5px;font-variant-numeric:tabular-nums;cursor:pointer;transition:background .12s ease,color .12s ease}',
         '.dsn-filter-btn:hover{background:rgba(127,127,127,.12);color:var(--dsn-fg)}',
