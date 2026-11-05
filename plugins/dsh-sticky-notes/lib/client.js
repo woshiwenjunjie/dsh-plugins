@@ -570,6 +570,8 @@
         'note.placeholder': '空的便签…',
         'note.aria': '便签内容',
         'note.edit': '点一下编辑',
+        'note.editBtn': '编辑这条便签',
+        'note.editingHint': '编辑中 · Esc 取消',
         'note.copy': '复制这条便签',
         'note.reorder': '拖动排序（键盘可用 ↑ ↓）',
         'note.pinned': '置顶',
@@ -671,6 +673,8 @@
         'note.placeholder': 'Empty note…',
         'note.aria': 'Note content',
         'note.edit': 'Click to edit',
+        'note.editBtn': 'Edit this note',
+        'note.editingHint': 'Editing · Esc to cancel',
         'note.copy': 'Copy this note',
         'note.reorder': 'Drag to reorder (or ↑ ↓)',
         'note.pinned': 'Pinned',
@@ -1039,8 +1043,32 @@
 
       // --------------------------------------------------------- 自动高度输入
 
+      // 「编辑」铅笔：给已保存便签一个明确的重新编辑入口（点它聚焦正文）。
+      function IconEdit(size) {
+        return pick('IconEditRegular', function (s) {
+          return svg(
+            [
+              h('path', { key: 'a', d: 'M4.5 19.5l4.3-.9L18.6 8.8l-3.4-3.4L5.4 15.2z' }),
+              h('path', { key: 'b', d: 'M13.9 6.7l3.4 3.4' }),
+            ],
+            s,
+          )
+        }, size)
+      }
+
       function AutoTextarea(props) {
         var ref = useRef(null)
+        // 焦点在正文里 = 正在编辑：编辑态允许长到视口的 60% 并内部滚动（长便签不再被 420px 截断），
+        // 退出编辑回到 420px 预览。之前只有 420px 上限，8000 字的便签编辑时看不全。
+        var focused = useRef(false)
+        function applyHeight() {
+          var el = ref.current
+          if (!el) return
+          var viewport = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 800
+          var cap = focused.current ? Math.max(160, Math.round(viewport * 0.6)) : 420
+          el.style.height = 'auto'
+          el.style.height = Math.min(el.scrollHeight || 0, cap) + 'px'
+        }
         // 外部需要拿到这个 textarea（打开面板时要聚焦草稿框）：用函数 ref 顺手转发出去。
         // 用函数 ref 而不是再挂一个 useEffect，是因为 commit 阶段就赋值好了，
         // 父组件的 effect 里能立刻拿到节点，不依赖 effect 的先后顺序。
@@ -1049,17 +1077,21 @@
           var external = props.inputRef
           if (external && typeof external === 'object') external.current = node
         }
-        useEffect(
-          function () {
-            var el = ref.current
-            if (!el) return
-            el.style.height = 'auto'
-            el.style.height = Math.min(el.scrollHeight, 420) + 'px'
-          },
-          [props.value],
-        )
+        useEffect(applyHeight, [props.value])
         var rest = Object.assign({}, props)
         delete rest.inputRef
+        var externalFocus = rest.onFocus
+        var externalBlur = rest.onBlur
+        rest.onFocus = function (event) {
+          focused.current = true
+          applyHeight()
+          if (typeof externalFocus === 'function') externalFocus(event)
+        }
+        rest.onBlur = function (event) {
+          focused.current = false
+          applyHeight()
+          if (typeof externalBlur === 'function') externalBlur(event)
+        }
         return h('textarea', Object.assign(rest, { ref: bindRef }))
       }
 
@@ -1456,6 +1488,8 @@
                   if (typeof onCommit === 'function') onCommit(note.id)
                 },
               }),
+          // 编辑中给一个明确出口：Esc 取消（恢复进入编辑前的原文），点别处/失焦 = 保存。
+          editing && !archived ? h('div', { className: 'dsn-edit-hint' }, t('note.editingHint')) : null,
           h(
             'div',
             { className: 'dsn-note-foot' },
@@ -1482,6 +1516,21 @@
                 )
               : null,
             h('div', { className: 'dsn-spacer' }),
+            archived
+              ? null
+              : h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsn-icon-btn dsn-edit',
+                    title: t('note.editBtn'),
+                    'aria-label': t('note.editBtn'),
+                    onClick: function () {
+                      if (typeof onStartEdit === 'function') onStartEdit(note.id)
+                    },
+                  },
+                  IconEdit(14),
+                ),
             archived
               ? null
               : h(
@@ -1614,6 +1663,8 @@
         var [query, setQuery] = useState('')
         // 搜索态下点中某一条：只把这一条切回可编辑，其余仍是只读高亮。
         var [editingId, setEditingId] = useState(null)
+        // 焦点在哪条便签的正文里：编辑态高亮 + 「编辑中 · Esc 取消」提示都靠它。
+        var [focusedId, setFocusedId] = useState(null)
         // 颜色：哪张卡片打开了调色板（一次只开一个）、搜索区选中的颜色、颜色菜单是否展开。
         var [paletteId, setPaletteId] = useState(null)
         var [colorFilter, setColorFilter] = useState(null)
@@ -1645,6 +1696,8 @@
         var editedInSession = useRef({})
         // 这条便签自上次失焦后有没有被真的改过：只有改过才更新排序时间。
         var touchedSinceFocus = useRef({})
+        // 进入编辑时的原文快照：Esc 取消时用它恢复（{ id, text } 或 null）。
+        var focusSnapshotRef = useRef(null)
         var searchRecorded = useRef(false)
         // 最新一份状态，供「刷新/卸载前补写」这类拿不到闭包的路径读取。
         var latestStore = useRef(store)
@@ -1653,6 +1706,113 @@
         var lastSavedNotes = useRef(store.notes)
         // 语言切换时重渲染一次，让 t() 重新绑定当前语言。
         var [localeTick, setLocaleTick] = useState(0)
+
+        // ---------------------------------------------------------- 重新编辑
+        //
+        // 已保存便签点正文/铅笔就能再改；编辑态给三样东西：
+        //   1) 视觉上「在编辑哪张」（卡片 focus-within 高亮 + 底部「编辑中 · Esc 取消」）；
+        //   2) Esc 取消这次编辑（恢复进入编辑前的原文），再按 Esc 才走原来的分层退出；
+        //   3) 长便签在编辑时放宽高度上限（见 AutoTextarea），不再是 420px 截断。
+
+        /** 找到某条便签的正文 textarea：铅笔入口 / 搜索态点编辑后把焦点送进去。 */
+        function noteInputNode(id) {
+          try {
+            if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return null
+            return document.querySelector('[data-dsn-note="' + String(id) + '"] textarea')
+          } catch (error) {
+            return null
+          }
+        }
+
+        /** 取消编辑后把焦点还给这张卡的「编辑」按钮（键盘用户不会掉到 body 上）。 */
+        function noteEditButtonNode(id) {
+          try {
+            if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return null
+            return document.querySelector('[data-dsn-note="' + String(id) + '"] .dsn-edit')
+          } catch (error) {
+            return null
+          }
+        }
+
+        /** Esc 取消这次编辑：正文恢复快照、退出编辑态，面板不收起。 */
+        var cancelNoteEdit = useCallback(function () {
+          var snapshot = focusSnapshotRef.current
+          focusSnapshotRef.current = null
+          setFocusedId(null)
+          setEditingId(null)
+          if (snapshot) {
+            // 取消 = 没改过：把「已改」标记清掉，失焦时不要刷新 updatedAt。
+            delete touchedSinceFocus.current[snapshot.id]
+            setStore(function (prev) {
+              var changed = false
+              var next = prev.notes.map(function (note) {
+                if (note.id !== snapshot.id || note.text === snapshot.text) return note
+                changed = true
+                return Object.assign({}, note, { text: snapshot.text })
+              })
+              return changed ? { notes: next, open: prev.open } : prev
+            })
+          }
+          try {
+            var active = document.activeElement
+            if (active && typeof active.blur === 'function') active.blur()
+            var button = snapshot ? noteEditButtonNode(snapshot.id) : null
+            if (button && typeof button.focus === 'function') button.focus()
+          } catch (error) {
+            // 没有 activeElement 的环境（测试/极端宿主）也不影响文本已恢复
+          }
+        }, [])
+
+        // 编辑态跟踪：正文获得焦点 = 进入编辑，失焦 = 保存并退出。
+        // 用 document 的 focusin/focusout 做事件委托：不给 300 张卡片各加两个 prop
+        // （多两个 prop 会把稳态渲染从 0.3ms 抬到 0.8ms，见 test/perf.mjs）。
+        useEffect(
+          function () {
+            if (!open) return undefined
+            function cardIdOf(target) {
+              if (!target || typeof target !== 'object') return null
+              if (String(target.tagName || '').toUpperCase() !== 'TEXTAREA') return null
+              try {
+                if (typeof target.closest !== 'function') return null
+                var card = target.closest('[data-dsn-note]')
+                return card && typeof card.getAttribute === 'function' ? card.getAttribute('data-dsn-note') : null
+              } catch (error) {
+                return null
+              }
+            }
+            function onFocusIn(event) {
+              var id = cardIdOf(event.target)
+              if (!id) return
+              var note = findIn(latestStore.current.notes, id)
+              if (!note || note.archived === true) return
+              focusSnapshotRef.current = { id: id, text: note.text }
+              setFocusedId(id)
+            }
+            function onFocusOut(event) {
+              if (!cardIdOf(event.target)) return
+              focusSnapshotRef.current = null
+              setFocusedId(null)
+              setEditingId(null)
+            }
+            document.addEventListener('focusin', onFocusIn, true)
+            document.addEventListener('focusout', onFocusOut, true)
+            return function () {
+              document.removeEventListener('focusin', onFocusIn, true)
+              document.removeEventListener('focusout', onFocusOut, true)
+            }
+          },
+          [open],
+        )
+
+        // 铅笔 / 搜索态点「编辑」：先把状态标好，渲染后把焦点送进正文（编辑态由 focusin 接手）。
+        useEffect(
+          function () {
+            if (!editingId) return
+            var node = noteInputNode(editingId)
+            if (node && typeof node.focus === 'function') node.focus()
+          },
+          [editingId],
+        )
 
         // 订阅语言切换；t 在每次渲染重新绑定，保证切换后立刻生效。
         useEffect(
@@ -1952,6 +2112,10 @@
           setColorFilter(null)
           setColorMenuOpen(false)
           setPaletteId(null)
+          // 收起面板时退出编辑态（不恢复原文：已经失焦/点别处就等于保存了）。
+          focusSnapshotRef.current = null
+          setFocusedId(null)
+          setEditingId(null)
           setStore(function (prev) {
             return prev.open ? { notes: prev.notes, open: false } : prev
           })
@@ -2001,6 +2165,11 @@
                   setColorMenuOpen(false)
                   return
                 }
+                // 编辑中：Esc 先取消这次编辑（恢复进入编辑前的原文），面板不收。
+                if (focusSnapshotRef.current || focusedId) {
+                  cancelNoteEdit()
+                  return
+                }
                 if (query) {
                   setQuery('')
                   return
@@ -2026,7 +2195,7 @@
               window.removeEventListener('keydown', onKeyDown, true)
             }
           },
-          [open, close, query, menuOpen, paletteId, colorMenuOpen, colorFilter],
+          [open, close, query, menuOpen, paletteId, colorMenuOpen, colorFilter, focusedId, cancelNoteEdit],
         )
 
         // 点面板外面收起。没有全屏遮罩，所以点一下别处既能让面板消失、又不会拦掉那次点击。
@@ -2270,7 +2439,13 @@
           [query],
         )
 
+        // 「编辑这条便签」入口（卡片铅笔按钮 / 搜索态点一下）：记下原文快照、标成编辑态，
+        // 渲染后由 editingId 的 effect 把焦点送进正文。
         var startEdit = useCallback(function (id) {
+          var note = findIn(latestStore.current.notes, id)
+          if (!note || note.archived === true) return
+          focusSnapshotRef.current = { id: id, text: note.text }
+          setFocusedId(id)
           setEditingId(id)
         }, [])
 
@@ -3043,7 +3218,7 @@
                     timeText: formatTime(note.updatedAt, tick, timeLabels),
                     t: t,
                     query: query,
-                    editing: editingId === note.id,
+                    editing: editingId === note.id || focusedId === note.id,
                     onStartEdit: startEdit,
                     onChange: updateNote,
                     onCommit: commitNote,
@@ -3167,12 +3342,15 @@
         // 复制按钮平时隐形，鼠标进卡片或键盘聚焦时才浮现：静态列表不加视觉噪声。
         '.dsn-copy{opacity:0;transition:opacity .12s ease}',
         '.dsn-note:hover .dsn-copy,.dsn-note:focus-within .dsn-copy,.dsn-copy:focus-visible{opacity:1}',
+        // 重新编辑入口：平时隐形，hover / 键盘聚焦 / 编辑中才出现（和复制按钮同一套规矩）。
+        '.dsn-edit{opacity:0;transition:opacity .12s ease}',
+        '.dsn-note:hover .dsn-edit,.dsn-note:focus-within .dsn-edit,.dsn-edit:focus-visible{opacity:1}',
         '.dsn-icon-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
         '.dsn-del.is-confirming{color:var(--dsw-alias-state-error-primary,#e5484d);background:rgba(229,72,77,.14)}',
         '.dsn-composer{padding:0 14px 10px;display:flex;flex-direction:column;gap:8px}',
         '.dsn-input{width:100%;resize:none;border:1px solid var(--dsn-line);border-radius:11px;padding:9px 11px;font:inherit;font-size:13px;line-height:1.55;background:rgba(127,127,127,.08);color:inherit;transition:border-color .12s ease,box-shadow .12s ease}',
         '.dsn-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
-        '.dsn-input:focus{outline:none;border-color:var(--dsn-accent);box-shadow:0 0 0 3px rgba(127,127,127,.2)}',
+        '.dsn-input:focus{outline:none;border-color:var(--dsn-accent);box-shadow:0 0 0 3px rgba(127,127,127,.2);overflow-y:auto}',
         '.dsn-search{position:relative;display:flex;align-items:center;gap:6px;margin:0 14px 8px;padding:0 6px 0 9px;border:1px solid var(--dsn-line);border-radius:9px;background:rgba(127,127,127,.06);min-height:32px}',
         '.dsn-search:focus-within{border-color:var(--dsn-accent)}',
         '.dsn-search-icon{display:grid;place-items:center;color:var(--dsn-fg-2);flex:0 0 auto}',
@@ -3250,7 +3428,7 @@
         'body[data-ds-dark-theme] .dsn-c-sky{--dsn-sticky:#4f9dff}',
         'body[data-ds-dark-theme] .dsn-c-violet{--dsn-sticky:#a58bfa}',
         '.dsn-note-input{width:100%;border:0;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:1.55;resize:none;padding:2px 2px 0;overflow:hidden;display:block}',
-        '.dsn-note-input:focus{outline:none}',
+        '.dsn-note-input:focus{outline:none;overflow-y:auto}',
         '.dsn-note-input::placeholder{color:var(--dsn-fg-2);opacity:.85}',
         '.dsn-note-view{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.55;padding:1px 2px 2px;border-radius:6px;cursor:text}',
         '.dsn-note-view:hover{background:rgba(127,127,127,.07)}',
@@ -3261,6 +3439,9 @@
         '.dsn-pin-mark{font-size:9.5px;line-height:1.6;color:var(--dsn-fg-2);background:rgba(127,127,127,.16);border-radius:6px;padding:0 5px;white-space:nowrap}',
         '.dsn-pin-btn.is-pinned{color:var(--dsn-fg);background:rgba(127,127,127,.18)}',
         '.dsn-note.is-pinned{box-shadow:inset 0 0 0 1px rgba(127,127,127,.1)}',
+        // 编辑态：整张卡加一圈品牌色描边，一眼看出在改哪条（之前聚焦没有任何视觉变化）。
+        '.dsn-note:focus-within{border-color:var(--dsn-accent);box-shadow:inset 0 0 0 1px var(--dsn-accent)}',
+        '.dsn-edit-hint{font-size:10.5px;line-height:1.7;color:var(--dsn-fg-2);padding:0 2px 1px}',
         '.dsn-note.is-archived{opacity:.62}',
         '.dsn-note.is-archived .dsn-note-input{cursor:default}',
         // 从剪贴板捕获到重复内容时：滚过去闪两下，别让用户以为「没反应」。
@@ -3292,7 +3473,7 @@
         '.dsn-palette-swatch{width:16px;height:16px;border-radius:50%;background:var(--dsn-sticky);box-shadow:0 0 0 1.5px var(--dsn-ring)}',
         '.dsn-palette-option.is-current .dsn-palette-swatch{box-shadow:0 0 0 2px var(--dsn-surface),0 0 0 3.5px var(--dsn-accent)}',
         '.dsn-palette-name{max-width:100%;font-size:9px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-        '.dsn-note-foot .dsn-icon-btn{width:28px;height:28px;border-radius:7px}',
+        '.dsn-note-foot .dsn-icon-btn{width:26px;height:26px;border-radius:7px}',
         '.dsn-empty{padding:26px 12px;text-align:center;line-height:1.8}',
         '.dsn-empty-title{font-size:13px;font-weight:650;color:var(--dsn-fg)}',
         '.dsn-empty-sub{font-size:11.5px;color:var(--dsn-fg-2)}',

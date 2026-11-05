@@ -239,6 +239,8 @@ const sandbox = {
       },
     },
     innerWidth: 1400,
+    // 编辑态高度上限按视口 60% 算：900 * 0.6 = 540px，测试里能断言具体的展开高度。
+    innerHeight: 900,
     setInterval: (fn, delay) => {
       timerSeq += 1
       timers.set(timerSeq, { fn, at: clock + (typeof delay === 'number' ? delay : 0), every: typeof delay === 'number' ? delay : 0 })
@@ -264,8 +266,18 @@ const sandbox = {
     createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, remove() {}, click() {} }),
     addEventListener: addDocumentListener,
     removeEventListener: removeDocumentListener,
-    querySelector: (selector) =>
-      selector === '[data-dsh-sidebar-root]' ? { getBoundingClientRect: () => ({ right: 248 }) } : null,
+    querySelector: (selector) => {
+      if (selector === '[data-dsh-sidebar-root]') return { getBoundingClientRect: () => ({ right: 248 }) }
+      // 组件里用 document.querySelector('[data-dsn-note="id"] textarea') 找正文（铅笔入口聚焦）。
+      // 假 DOM 没有节点树：卡片文章节点和正文按渲染顺序各排一列，两边都是便签顺序，按下标配对即可。
+      const match = /^\[data-dsn-note="([^"]+)"\] textarea$/.exec(String(selector))
+      if (!match) return null
+      const articleIds = elements.filter((el) => el.type === 'article').map((el) => el.props['data-dsn-note'])
+      const index = articleIds.indexOf(match[1])
+      if (index === -1) return null
+      const textareas = elements.filter((el) => el.type === 'textarea' && el.props.className === 'dsn-note-input')
+      return textareas[index] || null
+    },
   },
   // 组件里所有 Date.now() 都跟着虚拟时钟走：这样「30 秒心跳」「打开一会儿再记下」
   // 这类相对时间相关路径才能被测到，而不是依赖真机上两毫秒的差。
@@ -542,6 +554,86 @@ storageFull = false
 act(() => cards()[0].props.onChange({ target: { value: '新想法（又能存了）' } }))
 advance(300)
 check('恢复可写后回到已保存', hint() && hint().props.children, '已自动保存到本机')
+
+// ---------------------------------------------------------------- 重新编辑
+//
+// 已保存便签点铅笔 / 点正文即可再改；编辑中卡片高亮 + 「编辑中 · Esc 取消」；
+// Esc 恢复进入编辑前的原文且不收起面板；长便签编辑时高度上限放宽到视口 60%。
+
+const editSeed = [
+  { id: 'e1', text: '会被重新编辑的一条', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+  { id: 'e2', text: '第二条', color: 'sky', pinned: false, createdAt: now - 2000, updatedAt: now - 2000 },
+  { id: 'e3', text: '第三条', color: 'mint', pinned: false, createdAt: now - 3000, updatedAt: now - 3000 },
+]
+remount(editSeed)
+
+function editButtons() {
+  return elements.filter((el) => el.type === 'button' && el.props.className === 'dsn-icon-btn dsn-edit')
+}
+function editHint() {
+  return elements.find((el) => el.props.className === 'dsn-edit-hint')
+}
+/** 派发一次正文 focusin：模拟用户直接点到正文里（组件用 document 事件委托跟踪编辑态）。 */
+function focusinNote(id) {
+  const card = { getAttribute: () => id }
+  const target = { tagName: 'TEXTAREA', closest: (selector) => (selector === '[data-dsn-note]' ? card : null) }
+  for (const listener of (documentListeners.get('focusin') || []).slice()) listener({ target })
+  flush()
+}
+
+check('非归档便签都有「编辑」入口', editButtons().length, 3)
+const firstEdit = editButtons()[0]
+check('编辑入口带读屏文案', firstEdit && firstEdit.props['aria-label'], '编辑这条便签')
+check('默认没有「编辑中」提示', Boolean(editHint()), false)
+
+focusedElement = null
+act(() => {
+  if (firstEdit) firstEdit.props.onClick()
+})
+check('点编辑入口后焦点落到正文', focusedElement && focusedElement.props.className, 'dsn-note-input')
+check('进入编辑态有明确提示', editHint() && flattenText(editHint().props.children), '编辑中 · Esc 取消')
+
+// 长便签：编辑态高度上限 = 视口 60%（900 * 0.6 = 540），退出编辑回到 420 预览
+const longInput = cards()[0]
+longInput.scrollHeight = 1200
+if (typeof longInput.props.onFocus === 'function') act(() => longInput.props.onFocus({ target: longInput }))
+check('编辑时长正文可以展开到 60vh', longInput.style.height, '540px')
+if (typeof longInput.props.onBlur === 'function') act(() => longInput.props.onBlur({ target: longInput }))
+check('退出编辑回到 420px 预览', longInput.style.height, '420px')
+
+// 改到一半按 Esc：恢复进入编辑前的原文，面板不收起，也不把半截文本写进存储
+remount(editSeed)
+focusinNote('e1')
+act(() => cards()[0].props.onChange({ target: { value: '会被重新编辑的一条（改到一半）' } }))
+check('改动先进入界面', cards()[0].props.value, '会被重新编辑的一条（改到一半）')
+pressKey({ key: 'Escape' })
+check('Esc 取消编辑：恢复原文', cards()[0] ? cards()[0].props.value : null, '会被重新编辑的一条')
+check('Esc 取消后提示消失', Boolean(editHint()), false)
+check('Esc 取消编辑不会收起面板', elements.some((el) => el.props.className === 'dsn-panel'), true)
+advance(300)
+check('半截文本没有落盘', JSON.parse(storage.get('dsh-sticky-notes:v1')).notes.find((note) => note.id === 'e1').text, '会被重新编辑的一条')
+
+// 直接点正文（focusin 委托路径）也算进入编辑；Esc 同样能取消
+remount(editSeed)
+focusinNote('e2')
+check('点正文进入编辑态', Boolean(editHint()), true)
+act(() => cards()[1].props.onChange({ target: { value: '第二条（改到一半）' } }))
+pressKey({ key: 'Escape' })
+check('点正文进入的编辑也能 Esc 取消', cards()[1] ? cards()[1].props.value : null, '第二条')
+check('取消后面板还在（Esc 分层）', elements.some((el) => el.props.className === 'dsn-panel'), true)
+pressKey({ key: 'Escape' })
+check('再按 Esc 才收起面板', elements.some((el) => el.props.className === 'dsn-panel'), false)
+
+// 失焦 = 保存（和原来的自动保存体感一致）
+remount(editSeed)
+const saveEdit = editButtons()[0]
+act(() => {
+  if (saveEdit) saveEdit.props.onClick()
+})
+act(() => cards()[0].props.onChange({ target: { value: '会被重新编辑的一条（保存）' } }))
+act(() => cards()[0].props.onBlur({ target: cards()[0] }))
+advance(300)
+check('编辑后失焦即保存', JSON.parse(storage.get('dsh-sticky-notes:v1')).notes.find((note) => note.id === 'e1').text, '会被重新编辑的一条（保存）')
 
 // ---------------------------------------------------------------- 搜索与焦点
 
@@ -1525,5 +1617,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）',
 )

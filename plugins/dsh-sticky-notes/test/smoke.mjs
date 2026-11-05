@@ -177,6 +177,17 @@ else {
   if (mod.name !== pkg.name) problems.push(`模块 name 必须等于包名（${pkg.name}），实际：${mod.name}`)
   if (!Array.isArray(mod.inject) || mod.inject.indexOf('slots') === -1) problems.push('inject 里没有 slots')
   mod.apply(fakeCtx)
+  // 编辑态的一部分是纯样式（聚焦高亮 / 长文本编辑滚动），确认它们真的挂进了 <style>。
+  const styleEl = sandbox.document.head.children.find(
+    (el) => el.attributes && el.attributes['data-dsh-sticky-notes'] !== undefined,
+  )
+  if (!styleEl) problems.push('没有把样式挂到 document.head')
+  else {
+    const css = String(styleEl.textContent || '')
+    if (css.indexOf('.dsn-edit-hint') === -1) problems.push('缺少「编辑中 · Esc 取消」提示样式')
+    if (css.indexOf('.dsn-note:focus-within{border-color') === -1) problems.push('缺少编辑态卡片高亮样式')
+    if (css.indexOf('.dsn-note-input:focus{outline:none;overflow-y:auto') === -1) problems.push('缺少长文本编辑滚动样式')
+  }
   if (!registered) problems.push('没有注册任何 slot 组件')
   else {
     if (registered.descriptor.name !== 'shell.overlay') problems.push('注册到的 slot 不是 shell.overlay')
