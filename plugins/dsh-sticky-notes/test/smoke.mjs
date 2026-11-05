@@ -187,6 +187,8 @@ else {
     if (css.indexOf('.dsn-edit-hint') === -1) problems.push('缺少「编辑中 · Esc 取消」提示样式')
     if (css.indexOf('.dsn-note:focus-within{border-color') === -1) problems.push('缺少编辑态卡片高亮样式')
     if (css.indexOf('.dsn-note-input:focus{outline:none;overflow-y:auto') === -1) problems.push('缺少长文本编辑滚动样式')
+    if (css.indexOf('.dsn-voice{') === -1) problems.push('缺少语音录音状态行样式')
+    if (css.indexOf('.dsn-voice-mic') === -1) problems.push('缺少草稿框语音按钮样式')
   }
   if (!registered) problems.push('没有注册任何 slot 组件')
   else {

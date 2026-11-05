@@ -50,6 +50,23 @@ let lastBlob = null
 // 剪贴板：测试里捕获写进去的文本，也能模拟被拒绝。
 let clipboardText = null
 let clipboardFail = false
+// 语音：假 fetch（catalog / transcribe）、假麦克风与假 MediaRecorder / AudioContext。
+let voiceCatalogPayload = {
+  ok: true,
+  catalog: {
+    available: true,
+    reason: '',
+    providerId: 'sensevoice',
+    location: 'host-local',
+    preparation: 'ready',
+    language: 'auto',
+    limits: { maxDurationSeconds: 60, maxAudioBytes: 2 * 1024 * 1024 },
+  },
+}
+let voiceTranscribePayload = { ok: true, text: '语音识别出的文本', audioSeconds: 2, inferenceSeconds: 0.1 }
+let voiceFetchCalls = []
+let micError = null
+let micStreamStopped = 0
 // 组件收到的 props：真环境里是 slot 的标准 kit（含 useSessions），测试里可以模拟。
 let runtimeProps = {}
 // 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
@@ -220,6 +237,53 @@ function emitTree(node) {
   if (node.props) emitTree(node.props.children)
 }
 
+// 语音：假音频管线（不解码真音频，只保证「录音 → 重采样 → WAV → base64」状态机跑通）。
+class FakeAudioContext {
+  constructor() {
+    this.state = 'running'
+  }
+  decodeAudioData() {
+    return Promise.resolve({ duration: 2 })
+  }
+  close() {
+    this.state = 'closed'
+    return Promise.resolve()
+  }
+}
+class FakeOfflineAudioContext {
+  constructor(channels, length, sampleRate) {
+    this.length = length
+    this.sampleRate = sampleRate
+    this.destination = {}
+  }
+  createBufferSource() {
+    return { buffer: null, connect() {}, start() {} }
+  }
+  startRendering() {
+    const data = new Float32Array(Math.min(this.length || 32000, 32000))
+    data[0] = 0.2
+    return Promise.resolve({ getChannelData: () => data })
+  }
+}
+class FakeMediaRecorder {
+  constructor(stream) {
+    this.stream = stream
+    this.state = 'inactive'
+    this.mimeType = 'audio/webm'
+    this.ondataavailable = null
+    this.onstop = null
+    this.onerror = null
+  }
+  start() {
+    this.state = 'recording'
+    if (this.ondataavailable) this.ondataavailable({ data: { size: 64 } })
+  }
+  stop() {
+    this.state = 'inactive'
+    if (this.onstop) this.onstop()
+  }
+}
+
 const sandbox = {
   console,
   window: {
@@ -241,6 +305,8 @@ const sandbox = {
     innerWidth: 1400,
     // 编辑态高度上限按视口 60% 算：900 * 0.6 = 540px，测试里能断言具体的展开高度。
     innerHeight: 900,
+    AudioContext: FakeAudioContext,
+    OfflineAudioContext: FakeOfflineAudioContext,
     setInterval: (fn, delay) => {
       timerSeq += 1
       timers.set(timerSeq, { fn, at: clock + (typeof delay === 'number' ? delay : 0), every: typeof delay === 'number' ? delay : 0 })
@@ -288,13 +354,27 @@ const sandbox = {
   },
   Blob: class Blob {
     constructor(parts, options) {
-      this.parts = parts
+      this.parts = parts || []
       this.type = options && options.type
+      this.size = this.parts.reduce((sum, part) => sum + ((part && part.size) || 0), 0)
       lastBlob = this
     }
     text() {
       return Promise.resolve(this.parts.join(''))
     }
+    arrayBuffer() {
+      return Promise.resolve(new ArrayBuffer(8))
+    }
+  },
+  // 语音录音需要：btoa、MediaRecorder、假麦克风、同源 fetch（catalog / transcribe）。
+  btoa: (binary) => Buffer.from(binary, 'binary').toString('base64'),
+  MediaRecorder: FakeMediaRecorder,
+  fetch: (url, init) => {
+    const target = String(url)
+    voiceFetchCalls.push({ url: target, init })
+    if (target.indexOf('/voice/catalog') !== -1) return Promise.resolve({ json: () => Promise.resolve(voiceCatalogPayload) })
+    if (target.indexOf('/voice/transcribe') !== -1) return Promise.resolve({ json: () => Promise.resolve(voiceTranscribePayload) })
+    return Promise.reject(new Error('unexpected fetch: ' + target))
   },
   navigator: {
     clipboard: {
@@ -307,6 +387,20 @@ const sandbox = {
       readText() {
         if (clipboardFail) return Promise.reject(new Error('denied'))
         return Promise.resolve(clipboardText == null ? '' : String(clipboardText))
+      },
+    },
+    mediaDevices: {
+      getUserMedia() {
+        if (micError) return Promise.reject(micError)
+        return Promise.resolve({
+          getTracks: () => [
+            {
+              stop() {
+                micStreamStopped += 1
+              },
+            },
+          ],
+        })
       },
     },
   },
@@ -845,7 +939,7 @@ const roundTripSeed = [
 remount(roundTripSeed)
 
 act(() => menuButton().props.onClick({}))
-check('「更多」菜单有四项（备份 / 恢复 / 重排 / 从剪贴板记下）', menuItems().length, 4)
+check('「更多」菜单有五项（备份 / 恢复 / 重排 / 从剪贴板记下 / 语音记一条）', menuItems().length, 5)
 
 // 导出 → 清空 → 导入，字段要一模一样
 await actAsync(() => menuItems()[0].props.onClick({}))
@@ -1609,6 +1703,116 @@ maxPassCardRenders = 0
 advance(30000)
 check('30 秒心跳不会让时间文案没变的卡片重渲染', maxPassCardRenders, 0)
 
+// ---------------------------------------------------------------- 语音输入（2a）
+//
+// 真麦克风/真模型不参与单测：假 getUserMedia / MediaRecorder / AudioContext / fetch，
+// 验证「入口 → 录音 → 停止 → 转写 → 进草稿且不提交」与各失败态。
+
+const READY_VOICE_CATALOG = voiceCatalogPayload
+function voiceRow() {
+  return elements.find((el) => el.props.className === 'dsn-voice')
+}
+function voiceStopButton() {
+  return elements.find((el) => el.props.className === 'dsn-voice-btn')
+}
+function voiceMicButton() {
+  return elements.find((el) => el.props.className && String(el.props.className).indexOf('dsn-voice-mic') !== -1)
+}
+function voiceFetchTargets() {
+  return voiceFetchCalls.map((call) => call.url)
+}
+async function settleVoice() {
+  for (let i = 0; i < 8; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve))
+    flush()
+  }
+}
+
+const voiceSeed = [
+  { id: 'v1', text: '已有的一条', color: 'amber', pinned: false, createdAt: now - 1000, updatedAt: now - 1000 },
+]
+remount(voiceSeed)
+await settleVoice()
+check('打开面板会读一次语音 catalog', voiceFetchTargets().some((url) => url.indexOf('/voice/catalog') !== -1), true)
+check('没用过语音时草稿框没有麦克风', Boolean(voiceMicButton()), false)
+
+// 入口：⋯ 菜单最后一项，catalog 可用时不禁用
+act(() => menuButton().props.onClick({}))
+check('「更多」菜单多了语音入口（5 项）', menuItems().length, 5)
+const voiceEntry = menuItems()[4]
+check('语音入口文案', flattenText(voiceEntry && voiceEntry.props.children), '语音记一条')
+check('catalog 可用时语音入口可用', Boolean(voiceEntry && voiceEntry.props.disabled), false)
+
+// 录音 → 停止 → 转写 → 文本进草稿，且不自动提交
+const notesBeforeVoice = cards().length
+micStreamStopped = 0
+act(() => {
+  if (voiceEntry) voiceEntry.props.onClick()
+})
+await settleVoice()
+check('进入录音态出现状态行', Boolean(voiceRow()), true)
+check('录音状态行写「录音中」', flattenText(voiceRow()).indexOf('录音中') !== -1, true)
+act(() => {
+  if (voiceStopButton()) voiceStopButton().props.onClick()
+})
+check('停止后进入转写态', flattenText(voiceRow()).indexOf('转写中') !== -1, true)
+await settleVoice()
+check('识别文本进入草稿', draftArea().props.value, '语音识别出的文本')
+check('语音不自动提交（条数不变）', cards().length, notesBeforeVoice)
+check('转写完成后状态行消失', Boolean(voiceRow()), false)
+check('用过一次后草稿框出现麦克风', Boolean(voiceMicButton()), true)
+check('语音计数 +1', (() => {
+  const raw = storage.get('dsh-sticky-notes:metrics:v1')
+  return raw ? JSON.parse(raw).counters.voice : 0
+})(), 1)
+const transcribeCall = voiceFetchCalls.filter((call) => call.url.indexOf('/voice/transcribe') !== -1).pop()
+const sentBase64 = transcribeCall && JSON.parse(transcribeCall.init.body).audioBase64
+check('发给 host 的是 WAV（RIFF 头）', Boolean(sentBase64) && Buffer.from(sentBase64, 'base64').toString('ascii', 0, 4) === 'RIFF', true)
+
+// 麦克风权限被拒绝：给一句人话，不进录音态
+micError = { name: 'NotAllowedError' }
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+act(() => {
+  const entry = menuItems()[4]
+  if (entry) entry.props.onClick()
+})
+await settleVoice()
+check('权限拒绝给出说明', toastEl() && toastEl().props.children[0].props.children, '没有麦克风权限，请在系统/浏览器里允许后重试')
+check('权限拒绝后没有录音行', Boolean(voiceRow()), false)
+micError = null
+
+// provider 被设成云端：入口禁用 + title 说明，不偷偷发音频
+voiceCatalogPayload = {
+  ok: true,
+  catalog: { available: false, reason: 'not-local', providerId: 'cloud', location: 'cloud', preparation: 'ready', language: 'auto', limits: { maxDurationSeconds: 60, maxAudioBytes: 2 * 1024 * 1024 } },
+}
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+const gatedEntry = menuItems()[4]
+check('云端 provider 时语音入口禁用', Boolean(gatedEntry && gatedEntry.props.disabled), true)
+check('禁用原因写进 title', String(gatedEntry && gatedEntry.props.title).indexOf('云端') !== -1, true)
+voiceCatalogPayload = READY_VOICE_CATALOG
+
+// Esc 取消录音：释放麦克风，不发转写请求
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+act(() => {
+  const entry = menuItems()[4]
+  if (entry) entry.props.onClick()
+})
+await settleVoice()
+check('录音中状态行在', Boolean(voiceRow()), true)
+micStreamStopped = 0
+const transcribeBeforeCancel = voiceFetchTargets().filter((url) => url.indexOf('/voice/transcribe') !== -1).length
+pressKey({ key: 'Escape' })
+check('Esc 取消录音后状态行消失', Boolean(voiceRow()), false)
+check('Esc 取消时释放麦克风', micStreamStopped > 0, true)
+check('Esc 取消后不发转写请求', voiceFetchTargets().filter((url) => url.indexOf('/voice/transcribe') !== -1).length, transcribeBeforeCancel)
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -1617,5 +1821,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）',
 )

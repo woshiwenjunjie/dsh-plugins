@@ -419,7 +419,7 @@
       // 只落在 localStorage，不上报。导出 Markdown 时附在末尾，方便用一周后
       // 拿真实数据决定下一步优化顺序（而不是靠直觉）。
       var METRICS_KEY = 'dsh-sticky-notes:metrics:v1'
-      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'color', 'import', 'clipboard', 'lenShort', 'lenMedium', 'lenLong']
+      var METRIC_KEYS = ['open', 'create', 'edit', 'delete', 'undo', 'pin', 'archive', 'unarchive', 'export', 'search', 'color', 'import', 'clipboard', 'voice', 'lenShort', 'lenMedium', 'lenLong']
       var METRIC_LABELS = {
         open: '打开面板',
         create: '新建便签',
@@ -433,6 +433,7 @@
         search: '搜索',
         import: '导入备份',
         clipboard: '从剪贴板捕获',
+        voice: '语音输入',
         lenShort: '短便签（≤20 字）',
         lenMedium: '中便签（21–80 字）',
         lenLong: '长便签（>80 字）',
@@ -513,6 +514,123 @@
         return value.length > CLIP_PREVIEW ? value.slice(0, CLIP_PREVIEW) + '…' : value
       }
 
+      // ------------------------------------------------------------ 语音输入
+      //
+      // 录音在浏览器完成；转写走宿主半侧的同源 HTTP 桥（lib/index.js），
+      // 复用 DSH 本机的 speechToText（SenseVoice）。音频只在内存里走一趟：
+      // 不写 localStorage、不进备份、不记日志内容、不发网络请求。
+      var VOICE_BASE = '/_dsh/dsh-sticky-notes'
+      var VOICE_MAX_SECONDS = 60
+      var VOICE_MAX_BYTES = 2 * 1024 * 1024
+
+      /** 单声道 Float32 采样 → 16kHz PCM16 WAV（Host 只接受这种格式）。 */
+      function encodeWave(samples) {
+        var bytes = new Uint8Array(44 + samples.length * 2)
+        var view = new DataView(bytes.buffer)
+        function text(at, value) {
+          for (var i = 0; i < value.length; i += 1) bytes[at + i] = value.charCodeAt(i)
+        }
+        text(0, 'RIFF')
+        view.setUint32(4, bytes.length - 8, true)
+        text(8, 'WAVE')
+        text(12, 'fmt ')
+        view.setUint32(16, 16, true)
+        view.setUint16(20, 1, true)
+        view.setUint16(22, 1, true)
+        view.setUint32(24, 16000, true)
+        view.setUint32(28, 32000, true)
+        view.setUint16(32, 2, true)
+        view.setUint16(34, 16, true)
+        text(36, 'data')
+        view.setUint32(40, samples.length * 2, true)
+        for (var i = 0; i < samples.length; i += 1) {
+          var value = Math.max(-1, Math.min(1, samples[i]))
+          view.setInt16(44 + i * 2, Math.round(value * (value < 0 ? 32768 : 32767)), true)
+        }
+        return bytes
+      }
+
+      /** 二进制 → 无 dataURL 前缀的 base64（分块，避免 fromCharCode 爆栈）。 */
+      function bytesToBase64(bytes) {
+        var text = ''
+        for (var i = 0; i < bytes.length; i += 8192) {
+          text += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192))
+        }
+        return btoa(text)
+      }
+
+      /** 录音计时：秒 → mm:ss。 */
+      function formatClock(seconds) {
+        var total = Math.max(0, Math.floor(seconds || 0))
+        var minutes = Math.floor(total / 60)
+        var rest = total % 60
+        return (minutes < 10 ? '0' + minutes : minutes) + ':' + (rest < 10 ? '0' + rest : rest)
+      }
+
+      /** 同源 JSON 请求：fetch 不可用/非 JSON 都按失败处理。 */
+      function fetchJson(url, options) {
+        if (typeof fetch !== 'function') return Promise.reject(new Error('fetch unavailable'))
+        return fetch(url, options).then(function (response) {
+          if (!response || typeof response.json !== 'function') throw new Error('invalid response')
+          return response.json()
+        })
+      }
+
+      /** 停止一条录音会话：清定时器、停轨道、关 AudioContext（不涉及 UI 状态）。 */
+      function disposeVoiceSession(session) {
+        if (!session) return
+        session.cancelled = true
+        if (session.timer) window.clearInterval(session.timer)
+        if (session.maxTimer) window.clearTimeout(session.maxTimer)
+        session.timer = 0
+        session.maxTimer = 0
+        try {
+          if (session.recorder && session.recorder.state === 'recording') session.recorder.stop()
+        } catch (error) {
+          // 停止失败不影响后续资源释放
+        }
+        try {
+          if (session.stream) {
+            session.stream.getTracks().forEach(function (track) {
+              track.stop()
+            })
+          }
+        } catch (error) {
+          // 轨道可能已经结束
+        }
+        try {
+          if (session.context && session.context.state !== 'closed') session.context.close()
+        } catch (error) {
+          // AudioContext 关闭失败不影响内存回收
+        }
+      }
+
+      /** 把录到的 Blob 解码、重采样成 16kHz 单声道，再编码成 WAV 字节。 */
+      function blobToWave(blob, session) {
+        var Ctx = typeof window !== 'undefined' ? window.AudioContext || window.webkitAudioContext : null
+        var Offline = typeof window !== 'undefined' ? window.OfflineAudioContext || window.webkitOfflineAudioContext : null
+        if (!Ctx || !Offline) {
+          var missing = new Error('audio context unavailable')
+          missing.code = 'unavailable'
+          return Promise.reject(missing)
+        }
+        var context = session.context || new Ctx()
+        session.context = context
+        return Promise.resolve(blob.arrayBuffer()).then(function (buffer) {
+          return context.decodeAudioData(buffer)
+        }).then(function (decoded) {
+          var seconds = Math.max(0.2, Math.min(decoded && decoded.duration ? decoded.duration : 0, VOICE_MAX_SECONDS))
+          var offline = new Offline(1, Math.max(1, Math.floor(seconds * 16000)), 16000)
+          var source = offline.createBufferSource()
+          source.buffer = decoded
+          source.connect(offline.destination)
+          source.start()
+          return offline.startRendering()
+        }).then(function (rendered) {
+          return encodeWave(rendered.getChannelData(0))
+        })
+      }
+
       // ---------------------------------------------------------------- 文案
       //
       // 接入 DSH 的 locale 服务：zh 是键集真源，en 逐键对齐；其余语言自动按 en 回退。
@@ -532,6 +650,7 @@
         'menu.backup': '导出备份（JSON）',
         'menu.restore': '从备份恢复…',
         'menu.clipboard': '从剪贴板记下（先进草稿）',
+        'menu.voice': '语音记一条',
         'toast.imported': '已导入',
         'toast.updated': '更新',
         'toast.backedUp': '备份已导出',
@@ -546,6 +665,24 @@
         'toast.clipTooLong': '内容太长，便签不是剪藏（上限 8000 字）',
         'toast.clipLongDraft': '内容有点长，已放进草稿',
         'toast.clipUnavailable': '这个环境读不到剪贴板，可以点输入框按 Ctrl+V',
+        'voice.recording': '录音中',
+        'voice.transcribing': '转写中…',
+        'voice.stop': '停止录音',
+        'voice.cancel': '取消录音',
+        'voice.mic': '语音记一条',
+        'voice.done': '已识别，检查一下再按 Ctrl+Enter',
+        'voice.permission': '没有麦克风权限，请在系统/浏览器里允许后重试',
+        'voice.deviceMissing': '找不到麦克风设备',
+        'voice.unavailable': '这个环境用不了录音',
+        'voice.failed': '转写失败，请重试',
+        'voice.empty': '没听清，再说一次',
+        'voice.tooLong': '录音太长了（上限 60 秒）',
+        'voice.audioInvalid': '录音格式不对，请重试',
+        'voice.reason.loading': '正在检查语音服务…',
+        'voice.reason.no-service': 'DSH 语音服务未启用',
+        'voice.reason.no-provider': '没有可用的语音识别引擎',
+        'voice.reason.not-local': '语音 provider 被设成云端；便签只做本机识别',
+        'voice.reason.not-ready': '语音模型还没准备好（可在 DSH 设置里准备）',
         close: '收起便签栏',
         'close.esc': '收起便签栏（Esc）',
         'composer.placeholder': '写下此刻的想法…（Ctrl+Enter 记下）',
@@ -617,6 +754,7 @@
         'metric.color': '换色',
         'metric.import': '导入备份',
         'metric.clipboard': '从剪贴板捕获',
+        'metric.voice': '语音输入',
         'metric.lenShort': '短便签（≤20 字）',
         'metric.lenMedium': '中便签（21–80 字）',
         'metric.lenLong': '长便签（>80 字）',
@@ -635,6 +773,7 @@
         'menu.backup': 'Export backup (JSON)',
         'menu.restore': 'Restore from backup…',
         'menu.clipboard': 'Capture clipboard into draft',
+        'menu.voice': 'Dictate a note',
         'toast.imported': 'Imported',
         'toast.updated': 'updated',
         'toast.backedUp': 'Backup exported',
@@ -649,6 +788,24 @@
         'toast.clipTooLong': 'Too long for a note (8000 char limit)',
         'toast.clipLongDraft': 'Long text — added to the draft',
         'toast.clipUnavailable': "Can't read the clipboard here — click the input and press Ctrl+V",
+        'voice.recording': 'Recording',
+        'voice.transcribing': 'Transcribing…',
+        'voice.stop': 'Stop recording',
+        'voice.cancel': 'Cancel recording',
+        'voice.mic': 'Dictate a note',
+        'voice.done': 'Recognized — review, then press Ctrl+Enter',
+        'voice.permission': 'Microphone permission is blocked. Allow it, then retry.',
+        'voice.deviceMissing': 'No microphone found',
+        'voice.unavailable': "Recording isn't available here",
+        'voice.failed': "Couldn't transcribe — try again",
+        'voice.empty': "Didn't catch that — say it again",
+        'voice.tooLong': 'Recording is too long (60s limit)',
+        'voice.audioInvalid': 'Recording format was invalid — try again',
+        'voice.reason.loading': 'Checking the speech service…',
+        'voice.reason.no-service': 'DSH speech service is not enabled',
+        'voice.reason.no-provider': 'No speech recognizer is available',
+        'voice.reason.not-local': 'Speech provider is set to cloud; notes only recognize locally',
+        'voice.reason.not-ready': 'Speech model is not ready yet (prepare it in DSH settings)',
         close: 'Collapse notes',
         'close.esc': 'Collapse notes (Esc)',
         'composer.placeholder': 'Jot something… (Ctrl+Enter to save)',
@@ -720,6 +877,7 @@
         'metric.color': 'Color changes',
         'metric.import': 'Backups restored',
         'metric.clipboard': 'Clipboard captures',
+        'metric.voice': 'Voice inputs',
         'metric.lenShort': 'Short notes (≤20 chars)',
         'metric.lenMedium': 'Medium notes (21–80 chars)',
         'metric.lenLong': 'Long notes (>80 chars)',
@@ -1053,6 +1211,26 @@
             ],
             s,
           )
+        }, size)
+      }
+
+      // 语音：麦克风 / 停止。录音只在本机进程内转写，图标沿用现有描边风格。
+      function IconMic(size) {
+        return pick('IconMicRegular', function (s) {
+          return svg(
+            [
+              h('path', { key: 'a', d: 'M12 3.5a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0v-5a3 3 0 0 1 3-3z' }),
+              h('path', { key: 'b', d: 'M6 11a6 6 0 0 0 12 0' }),
+              h('path', { key: 'c', d: 'M12 17v3.5' }),
+            ],
+            s,
+          )
+        }, size)
+      }
+
+      function IconStop(size) {
+        return pick('IconStopRegular', function (s) {
+          return svg([h('path', { key: 'a', d: 'M7.5 7.5h9v9h-9z' })], s)
         }, size)
       }
 
@@ -1665,6 +1843,13 @@
         var [editingId, setEditingId] = useState(null)
         // 焦点在哪条便签的正文里：编辑态高亮 + 「编辑中 · Esc 取消」提示都靠它。
         var [focusedId, setFocusedId] = useState(null)
+        // 语音：catalog 决定麦克风能不能用；voice 是一次「录音 → 转写」的状态机。
+        var [voiceCatalog, setVoiceCatalog] = useState(null)
+        var [voice, setVoice] = useState({ phase: 'idle', elapsed: 0 })
+        // 用过一次语音之后才把麦克风放进草稿框（渐进披露；用埋点判断，不新增 localStorage key）。
+        var [voiceUsed, setVoiceUsed] = useState(function () {
+          return readMetrics().counters.voice > 0
+        })
         // 颜色：哪张卡片打开了调色板（一次只开一个）、搜索区选中的颜色、颜色菜单是否展开。
         var [paletteId, setPaletteId] = useState(null)
         var [colorFilter, setColorFilter] = useState(null)
@@ -1692,6 +1877,9 @@
         // 拖动排序的源 id：拖动过程中只改这个 ref，不触发整列表重渲染。
         var dragSourceRef = useRef(null)
         var searchRef = useRef(null)
+        // 语音录音会话（麦克风/recorder/定时器/音频上下文）与正在进行的转写请求。
+        var voiceRef = useRef(null)
+        var voiceAbortRef = useRef(null)
         // 埋点去抖：同一条便签一次会话里只记一次「编辑」，搜索一次会话只记一次。
         var editedInSession = useRef({})
         // 这条便签自上次失焦后有没有被真的改过：只有改过才更新排序时间。
@@ -1813,6 +2001,282 @@
           },
           [editingId],
         )
+
+        // ---------------------------------------------------------- 语音输入
+        //
+        // 打开面板时读一次 catalog（provider 是否本机、模型是否就绪），决定麦克风可用性。
+        // 不在面板里触发模型下载：未就绪只显示说明，下载/切换留给 DSH 自己的语音设置。
+        useEffect(
+          function () {
+            if (!open) return undefined
+            var cancelled = false
+            fetchJson(VOICE_BASE + '/voice/catalog').then(
+              function (data) {
+                if (cancelled) return
+                var catalog = data && data.ok === true && data.catalog ? data.catalog : null
+                setVoiceCatalog(
+                  catalog || { available: false, reason: 'no-service', limits: { maxDurationSeconds: VOICE_MAX_SECONDS, maxAudioBytes: VOICE_MAX_BYTES } },
+                )
+              },
+              function () {
+                if (!cancelled) {
+                  setVoiceCatalog({ available: false, reason: 'no-service', limits: { maxDurationSeconds: VOICE_MAX_SECONDS, maxAudioBytes: VOICE_MAX_BYTES } })
+                }
+              },
+            )
+            return function () {
+              cancelled = true
+            }
+          },
+          [open],
+        )
+
+        // 卸载时释放麦克风/录音定时器（关面板走 close()，这里兜底组件被卸载）。
+        useEffect(function () {
+          return function () {
+            if (voiceAbortRef.current) {
+              try {
+                voiceAbortRef.current.abort()
+              } catch (error) {}
+              voiceAbortRef.current = null
+            }
+            if (voiceRef.current) {
+              disposeVoiceSession(voiceRef.current)
+              voiceRef.current = null
+            }
+          }
+        }, [])
+
+        function voiceReasonText(reason) {
+          var key = 'voice.reason.' + String(reason || 'no-service')
+          var label = t(key)
+          return label && label !== key ? label : t('voice.unavailable')
+        }
+
+        function voiceErrorText(code) {
+          if (code === 'permission') return t('voice.permission')
+          if (code === 'device-missing') return t('voice.deviceMissing')
+          if (code === 'empty') return t('voice.empty')
+          if (code === 'too-long') return t('voice.tooLong')
+          if (code === 'bad-audio') return t('voice.audioInvalid')
+          if (code === 'no-service') return voiceReasonText('no-service')
+          if (code === 'no-provider') return voiceReasonText('no-provider')
+          if (code === 'not-local') return voiceReasonText('not-local')
+          if (code === 'not-ready') return voiceReasonText('not-ready')
+          if (code === 'unavailable') return t('voice.unavailable')
+          return t('voice.failed')
+        }
+
+        /** 开始录音：拿麦克风 → MediaRecorder → 计时 + 60 秒自动停。 */
+        function startVoice() {
+          if (voiceRef.current || voice.phase !== 'idle') return
+          if (!voiceCatalog || voiceCatalog.available !== true) {
+            showToast({ kind: 'error', text: voiceReasonText(voiceCatalog && voiceCatalog.reason) }, 4000)
+            return
+          }
+          var nav = typeof navigator !== 'undefined' ? navigator : null
+          if (!nav || !nav.mediaDevices || typeof nav.mediaDevices.getUserMedia !== 'function' || typeof MediaRecorder === 'undefined') {
+            showToast({ kind: 'error', text: t('voice.unavailable') }, 4000)
+            return
+          }
+          var session = {
+            startedAt: Date.now(),
+            elapsed: 0,
+            chunks: [],
+            stream: null,
+            recorder: null,
+            context: null,
+            timer: 0,
+            maxTimer: 0,
+            cancelled: false,
+            stopping: false,
+          }
+          voiceRef.current = session
+          setVoice({ phase: 'recording', elapsed: 0 })
+          function failStart(code) {
+            if (voiceRef.current === session) voiceRef.current = null
+            disposeVoiceSession(session)
+            setVoice({ phase: 'idle', elapsed: 0 })
+            showToast({ kind: 'error', text: voiceErrorText(code) }, 4000)
+          }
+          nav.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false }).then(
+            function (stream) {
+              if (voiceRef.current !== session || session.cancelled) {
+                try {
+                  stream.getTracks().forEach(function (track) {
+                    track.stop()
+                  })
+                } catch (error) {}
+                return
+              }
+              session.stream = stream
+              try {
+                var recorder = new MediaRecorder(stream)
+                session.recorder = recorder
+                recorder.ondataavailable = function (event) {
+                  if (!session.cancelled && event && event.data && event.data.size > 0) session.chunks.push(event.data)
+                }
+                recorder.start()
+              } catch (error) {
+                failStart('unavailable')
+                return
+              }
+              session.timer = window.setInterval(function () {
+                var elapsed = Math.floor((Date.now() - session.startedAt) / 1000)
+                setVoice(function (prev) {
+                  return prev.phase === 'recording' && prev.elapsed !== elapsed ? { phase: 'recording', elapsed: elapsed } : prev
+                })
+              }, 500)
+              session.maxTimer = window.setTimeout(function () {
+                stopVoice()
+              }, VOICE_MAX_SECONDS * 1000)
+            },
+            function (error) {
+              if (session.cancelled) return
+              var name = error && error.name
+              failStart(name === 'NotAllowedError' ? 'permission' : name === 'NotFoundError' || name === 'OverconstrainedError' ? 'device-missing' : 'unavailable')
+            },
+          )
+        }
+
+        /** 停止录音并转写：音频只在内存里走一趟，结果只进草稿、不自动提交。 */
+        function stopVoice() {
+          var session = voiceRef.current
+          if (!session || !session.recorder || session.stopping) return
+          session.stopping = true
+          session.elapsed = Math.max(0, Math.floor((Date.now() - session.startedAt) / 1000))
+          if (session.timer) {
+            window.clearInterval(session.timer)
+            session.timer = 0
+          }
+          if (session.maxTimer) {
+            window.clearTimeout(session.maxTimer)
+            session.maxTimer = 0
+          }
+          setVoice({ phase: 'transcribing', elapsed: session.elapsed })
+          var recorder = session.recorder
+          var stopped = new Promise(function (resolve) {
+            recorder.onstop = function () {
+              resolve()
+            }
+          })
+          try {
+            recorder.stop()
+          } catch (error) {
+            finishVoiceFailure(session, 'unavailable')
+            return
+          }
+          stopped
+            .then(function () {
+              if (session.cancelled) return null
+              return transcribeSession(session, recorder)
+            })
+            .then(function (text) {
+              if (session.cancelled || text === null) return
+              if (!text) {
+                finishVoiceFailure(session, 'empty')
+                return
+              }
+              insertVoiceText(text)
+              if (voiceRef.current === session) voiceRef.current = null
+              disposeVoiceSession(session)
+              setVoice({ phase: 'idle', elapsed: 0 })
+              setVoiceUsed(true)
+              recordMetric('voice')
+              showToast({ kind: 'info', text: t('voice.done') }, 2600)
+            })
+            .catch(function (error) {
+              if (session.cancelled) return
+              finishVoiceFailure(session, (error && error.code) || 'failed')
+            })
+        }
+
+        function transcribeSession(session, recorder) {
+          var blob = new Blob(session.chunks, { type: recorder.mimeType || 'audio/webm' })
+          if (!blob || !blob.size) {
+            var empty = new Error('empty')
+            empty.code = 'empty'
+            return Promise.reject(empty)
+          }
+          return blobToWave(blob, session).then(function (bytes) {
+            if (session.cancelled) {
+              var cancelled = new Error('cancelled')
+              cancelled.code = 'cancelled'
+              throw cancelled
+            }
+            var payload = { audioBase64: bytesToBase64(bytes) }
+            if (voiceCatalog && voiceCatalog.language && voiceCatalog.language !== 'auto') payload.language = voiceCatalog.language
+            var controller = typeof AbortController === 'function' ? new AbortController() : null
+            voiceAbortRef.current = controller
+            return fetchJson(VOICE_BASE + '/voice/transcribe', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(payload),
+              signal: controller ? controller.signal : undefined,
+            }).then(
+              function (data) {
+                if (voiceAbortRef.current === controller) voiceAbortRef.current = null
+                if (!data || data.ok !== true) {
+                  var failed = new Error('transcribe failed')
+                  failed.code = (data && data.error && data.error.code) || 'transcribe-failed'
+                  throw failed
+                }
+                return String(data.text || '').trim()
+              },
+              function (error) {
+                if (voiceAbortRef.current === controller) voiceAbortRef.current = null
+                throw error
+              },
+            )
+          })
+        }
+
+        function finishVoiceFailure(session, code) {
+          if (voiceRef.current === session) voiceRef.current = null
+          disposeVoiceSession(session)
+          setVoice({ phase: 'idle', elapsed: 0 })
+          if (code === 'cancelled') return
+          showToast({ kind: 'error', text: voiceErrorText(code) }, 4000)
+        }
+
+        /** 取消录音/转写：释放麦克风、中止请求，界面回到 idle。 */
+        function cancelVoice() {
+          var session = voiceRef.current
+          voiceRef.current = null
+          if (voiceAbortRef.current) {
+            try {
+              voiceAbortRef.current.abort()
+            } catch (error) {}
+            voiceAbortRef.current = null
+          }
+          if (session) disposeVoiceSession(session)
+          setVoice({ phase: 'idle', elapsed: 0 })
+        }
+
+        /** 识别文本进草稿：光标在草稿里就插到光标处，否则追加到末尾；不自动提交。 */
+        function insertVoiceText(text) {
+          var clean = String(text == null ? '' : text).trim()
+          if (!clean) return
+          var node = draftRef.current
+          var current = draft
+          var focused = node && typeof document !== 'undefined' && document.activeElement === node
+          if (focused && typeof node.selectionStart === 'number' && typeof node.selectionEnd === 'number') {
+            var start = node.selectionStart
+            var end = node.selectionEnd
+            setDraft(current.slice(0, start) + clean + current.slice(end))
+            var caret = start + clean.length
+            window.setTimeout(function () {
+              try {
+                node.focus()
+                node.setSelectionRange(caret, caret)
+              } catch (error) {
+                // 老浏览器没有 setSelectionRange 也不影响文本已写入
+              }
+            }, 0)
+            return
+          }
+          setDraft(current ? current.replace(/\s+$/, '') + '\n' + clean : clean)
+        }
 
         // 订阅语言切换；t 在每次渲染重新绑定，保证切换后立刻生效。
         useEffect(
@@ -2116,6 +2580,8 @@
           focusSnapshotRef.current = null
           setFocusedId(null)
           setEditingId(null)
+          // 语音：关面板/点外面等于取消录音，不能留着麦克风。
+          if (voiceRef.current || voiceAbortRef.current) cancelVoice()
           setStore(function (prev) {
             return prev.open ? { notes: prev.notes, open: false } : prev
           })
@@ -2153,6 +2619,11 @@
                 // 所以 keyCode 229 一起判（和草稿框 Ctrl+Enter 那处同一个坑）。
                 if (event.isComposing || event.keyCode === 229) return
                 event.stopPropagation()
+                // 录音/转写中：Esc 先取消语音（释放麦克风），不关面板。
+                if (voiceRef.current) {
+                  cancelVoice()
+                  return
+                }
                 if (menuOpen) {
                   setMenuOpen(false)
                   return
@@ -2954,6 +3425,23 @@
                     IconCopy(14),
                     h('span', null, t('menu.clipboard')),
                   ),
+                  // 语音输入：识别结果只进草稿、不自动提交；provider 不可用时禁用并说明原因。
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsn-menu-item',
+                      disabled: voice.phase !== 'idle' || !voiceCatalog || voiceCatalog.available !== true,
+                      title: voiceCatalog && voiceCatalog.available === true ? t('menu.voice') : voiceReasonText(voiceCatalog && voiceCatalog.reason),
+                      onClick: function () {
+                        setMenuOpen(false)
+                        startVoice()
+                      },
+                    },
+                    IconMic(14),
+                    h('span', null, t('menu.voice')),
+                  ),
                 )
               : null,
             h('input', {
@@ -2969,6 +3457,33 @@
           h(
             'div',
             { className: 'dsn-composer' },
+            // 录音/转写状态行：只在这两种状态存在，结束后消失（不占常驻首屏）。
+            voice.phase !== 'idle'
+              ? h(
+                  'div',
+                  { className: 'dsn-voice', role: 'status', 'aria-live': 'polite' },
+                  h('span', { className: 'dsn-voice-dot', 'aria-hidden': 'true' }),
+                  h(
+                    'span',
+                    { className: 'dsn-voice-text' },
+                    voice.phase === 'recording' ? t('voice.recording') + ' · ' + formatClock(voice.elapsed) : t('voice.transcribing'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsn-voice-btn',
+                      title: voice.phase === 'recording' ? t('voice.stop') : t('voice.cancel'),
+                      'aria-label': voice.phase === 'recording' ? t('voice.stop') : t('voice.cancel'),
+                      onClick: function () {
+                        if (voice.phase === 'recording') stopVoice()
+                        else cancelVoice()
+                      },
+                    },
+                    voice.phase === 'recording' ? IconStop(12) : IconClose(12),
+                  ),
+                )
+              : null,
             h(AutoTextarea, {
               inputRef: draftRef,
               className: 'dsn-input dsn-draft',
@@ -3000,6 +3515,24 @@
                 },
                 saveFailed ? t('save.failed') : dirty ? t('saving') : t('saved'),
               ),
+              // 用过一次语音后，草稿框常驻一个麦克风（渐进披露；21 次记录里大约 1 次会用到）。
+              voiceUsed || voice.phase !== 'idle'
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsn-icon-btn dsn-voice-mic' + (voice.phase === 'recording' ? ' is-recording' : ''),
+                      title: voice.phase === 'recording' ? t('voice.stop') : t('voice.mic'),
+                      'aria-label': voice.phase === 'recording' ? t('voice.stop') : t('voice.mic'),
+                      disabled: voice.phase === 'idle' && (!voiceCatalog || voiceCatalog.available !== true),
+                      onClick: function () {
+                        if (voice.phase === 'recording') stopVoice()
+                        else if (voice.phase === 'idle') startVoice()
+                      },
+                    },
+                    voice.phase === 'recording' ? IconStop(14) : IconMic(14),
+                  )
+                : null,
               h(
                 'button',
                 { type: 'button', className: 'dsn-save', disabled: draft.trim().length === 0, onClick: function () { addNote(draft) } },
@@ -3383,6 +3916,16 @@
         '.dsn-filter-btn.is-active{background:var(--dsn-accent);color:var(--dsn-on-accent);border-color:var(--dsn-accent)}',
         '.dsn-filter-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
         '.dsn-composer-foot{display:flex;align-items:center;gap:8px}',
+        // 语音：录音/转写状态行只在这两种状态出现；麦克风用过一次后才进草稿框 foot。
+        '.dsn-voice{display:flex;align-items:center;gap:8px;min-height:34px;padding:4px 6px 4px 10px;border:1px dashed var(--dsn-line);border-radius:9px;background:rgba(127,127,127,.06);color:var(--dsn-fg-2);font-size:11.5px}',
+        '.dsn-voice-dot{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:var(--dsw-alias-state-error-primary,#e5484d);animation:dsn-pulse 1.1s ease-in-out infinite}',
+        '.dsn-voice-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+        '.dsn-voice-btn{display:grid;place-items:center;width:26px;height:26px;flex:0 0 auto;padding:0;border:0;border-radius:7px;background:transparent;color:var(--dsn-fg-2);cursor:pointer}',
+        '.dsn-voice-btn:hover{background:rgba(127,127,127,.18);color:var(--dsn-fg)}',
+        '.dsn-voice-btn:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-voice-mic.is-recording{color:var(--dsw-alias-state-error-primary,#e5484d)}',
+        '@keyframes dsn-pulse{0%,100%{opacity:.35}50%{opacity:1}}',
+        '@media (prefers-reduced-motion: reduce){.dsn-voice-dot{animation:none}}',
         '.dsn-hint{font-size:11px;color:var(--dsn-fg-2);margin-right:auto}',
         // 小字不用错误色当文字色：实测浅色主题下 error 色压白底只有 4.50:1，
         // 贴着 AA 线。改成正文色 + 一个错误色圆点（图形元素只需 3:1 语义）。

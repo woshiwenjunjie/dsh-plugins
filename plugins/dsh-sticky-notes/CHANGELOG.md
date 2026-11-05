@@ -2,6 +2,54 @@
 
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.22] - 2026-11-05
+
+主题：**语音输入（2a）——说一句，识别结果只进草稿**。
+
+设计稿：`.scratch/alignment/2026-11-05T2023-语音输入与搜索设计.md`。
+拍板：结果只进草稿 / 语音搜索下一版做（直接填并立即筛）/ provider 不可用时禁用 + 说明。
+
+### 新增
+
+- **宿主语音桥**（`lib/index.js`，第一次用上宿主半侧）：按 dsh-prompt 的先例用
+  `ctx.webServer.register` 挂 `/_dsh/dsh-sticky-notes/voice/*` 前缀路由——
+  `GET …/voice/catalog` 返回 provider 可用性/语言/上限，`POST …/voice/transcribe` 收
+  base64 WAV 并转发给 DSH 的 `speechToText`。只接受 loopback Host；校验 canonical base64、
+  2MB / 60 秒上限与 WAV 头；音频只在内存里走一趟，不落盘、不写日志内容。
+- **浏览器录音**：`getUserMedia` + `MediaRecorder` → `decodeAudioData` →
+  `OfflineAudioContext(16kHz 单声道)` 重采样 → 自己编码 PCM16 WAV → base64 →
+  同源 `fetch` 桥。录音上限 60 秒，到点自动停止。
+- **入口与渐进披露**：`⋯` 菜单新增「语音记一条」（低频入口）；成功用过一次后，草稿框底部
+  才出现麦克风（用 `voice` 埋点判断，不新增 localStorage key）。录音/转写期间显示一行状态
+  （录音中 · 计时 / 转写中…）+ 停止按钮，结束即消失。
+- **失败态分开**：无麦克风权限 / 找不到设备 / 环境不支持 / 转写失败 / 没听清 / 录音超长 /
+  音频格式错 / 语音服务未启用 / provider 不是本机 / 模型未就绪——各一句人话。
+- **provider 硬闸门**：只有 `location === 'host-local'` 且 `preparation === 'ready'` 才放行；
+  云端 provider 或模型未就绪时入口 disabled + `title` 说明，**不在面板里触发模型下载**。
+- **只进草稿、不自动提交**：识别文本进草稿（草稿框有焦点时插光标处，否则追加末尾），
+  用户检查/修改后自己 `Ctrl+Enter`。`Esc` 取消录音/转写并释放麦克风；关面板同样取消。
+
+### 变更
+
+- README 的隐私承诺改写：从「不经 Host、不发网络请求」改成
+  「便签正文只存本机 localStorage；语音识别在本机 Host 进程内完成，音频只在内存里走一趟、
+  转写完即丢，不上报、不联网」。
+- `METRIC_KEYS` 新增 `voice` 计数（导出 Markdown 的本机统计里会多一行）。
+- `scripts/check.mjs` 的测试清单加入 `host.mjs`；插件 `npm test` 一起跑宿主桥单测。
+
+### 测试
+
+- **新增 `test/host.mjs`**：路由注册形态、catalog 的四种不可用原因、transcribe 成功与
+  输入校验（非法 base64 / 非 WAV / 超时长 / 超大小）、转写失败与空结果、非 loopback 403、未知路由 404。
+- **`test/behavior.mjs` 新增「语音输入」组**：打开面板读 catalog、菜单入口与禁用态、
+  录音 → 停止 → 转写 → 文本进草稿且不提交、上送的是 RIFF WAV、权限拒绝提示、
+  云端 provider 禁用 + title、Esc 取消释放麦克风且不发转写请求、语音计数 +1。
+  测试台补了假 `getUserMedia` / `MediaRecorder` / `AudioContext` / `OfflineAudioContext` /
+  `fetch` / `btoa`。
+- **`test/smoke.mjs` 新增 2 条样式断言**（录音状态行、草稿框语音按钮）。
+- 反验：把 `lib/client.js`、`lib/index.js` 换回 0.1.21 再跑，宿主桥 4 条、behavior 16 条、
+  smoke 2 条断言全红；换回本版全绿。
+
 ## [0.1.21] - 2026-11-05
 
 主题：**重新编辑：看得见在改哪条，改错了能原地反悔**。
