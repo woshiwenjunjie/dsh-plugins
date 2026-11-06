@@ -682,11 +682,13 @@
         'toast.clipUnavailable': '这个环境读不到剪贴板，可以点输入框按 Ctrl+V',
         'voice.recording': '录音中',
         'voice.transcribing': '转写中…',
+        'voice.transcribingFor': '已用时',
         'voice.stop': '停止录音',
         'voice.cancel': '取消录音',
         'voice.mic': '语音记一条',
         'voice.search': '语音搜索',
         'voice.done': '已识别，检查一下再按 Ctrl+Enter',
+        'voice.done.search': '已按语音筛选',
         'voice.permission': '没有麦克风权限，请在系统/浏览器里允许后重试',
         'voice.deviceMissing': '找不到麦克风设备',
         'voice.unavailable': '这个环境用不了录音',
@@ -809,11 +811,13 @@
         'toast.clipUnavailable': "Can't read the clipboard here — click the input and press Ctrl+V",
         'voice.recording': 'Recording',
         'voice.transcribing': 'Transcribing…',
+        'voice.transcribingFor': 'waited',
         'voice.stop': 'Stop recording',
         'voice.cancel': 'Cancel recording',
         'voice.mic': 'Dictate a note',
         'voice.search': 'Voice search',
         'voice.done': 'Recognized — review, then press Ctrl+Enter',
+        'voice.done.search': 'Filtered by voice',
         'voice.permission': 'Microphone permission is blocked. Allow it, then retry.',
         'voice.deviceMissing': 'No microphone found',
         'voice.unavailable': "Recording isn't available here",
@@ -1856,6 +1860,11 @@
         // 会话标题表：只用来给「别的会话里写的便签」标来源。
         var sessionTitles = useSessionTitles(props)
         var [store, setStore] = useState(readStore)
+        // 面板开合是多个 effect 的依赖项，必须在这里先取出来：
+        // 若留到组件函数后部再 `var open = store.open`，每个 effect 的依赖数组
+        // 都会在该行之前求值、永远拿到 undefined，effect 便只在挂载时跑一次
+        // （语音 catalog 就是这样从不请求、入口一直灰的）。
+        var open = store.open
         var [draft, setDraft] = useState(readDraft)
         var [tick, setTick] = useState(Date.now())
         var [dirty, setDirty] = useState(false)
@@ -2078,6 +2087,25 @@
           return label && label !== key ? label : t('voice.unavailable')
         }
 
+        /** catalog 还没回来时是「正在检查」，不能一上来就说「未启用」。 */
+        function voiceCatalogReason() {
+          if (!voiceCatalog) return 'loading'
+          return voiceCatalog.reason || ''
+        }
+
+        /**
+         * 三个麦克风按钮共用一套门控：
+         * 录音中 = 停止；转写中 = 禁用（等结果）；catalog 不可用 = 禁用并说明原因。
+         */
+        function voiceMicGate(idleLabel) {
+          if (voice.phase === 'recording') return { disabled: false, title: t('voice.stop'), recording: true }
+          if (voice.phase === 'transcribing') return { disabled: true, title: t('voice.transcribing'), recording: false }
+          if (!voiceCatalogUsable(voiceCatalog)) {
+            return { disabled: true, title: voiceReasonText(voiceCatalogReason()), recording: false }
+          }
+          return { disabled: false, title: idleLabel, recording: false }
+        }
+
         function voiceErrorText(code) {
           if (code === 'permission') return t('voice.permission')
           if (code === 'device-missing') return t('voice.deviceMissing')
@@ -2096,7 +2124,7 @@
         function startVoice(target) {
           if (voiceRef.current || voice.phase !== 'idle') return
           if (!voiceCatalogUsable(voiceCatalog)) {
-            showToast({ kind: 'error', text: voiceReasonText(voiceCatalog && voiceCatalog.reason) }, 4000)
+            showToast({ kind: 'error', text: voiceReasonText(voiceCatalogReason()) }, 4000)
             return
           }
           voiceTargetRef.current = target === 'search' ? 'search' : 'draft'
@@ -2166,7 +2194,18 @@
                 return
               }
               session.monitor = window.setInterval(function () {
-                if (session.cancelled || session.stopping) return
+                if (session.cancelled) return
+                // 停止录音后进入转写：同一监视定时器继续把「已用时」写进状态行，
+                // 不用为转写再挂一个 interval（dispose 时一起清掉）。
+                if (session.stopping) {
+                  if (!session.transcribeStartedAt) return
+                  var waited = Math.floor((Date.now() - session.transcribeStartedAt) / 1000)
+                  setVoice(function (prev) {
+                    if (prev.phase !== 'transcribing' || prev.elapsed === waited) return prev
+                    return { phase: 'transcribing', elapsed: waited, level: 0 }
+                  })
+                  return
+                }
                 var now = Date.now()
                 var elapsed = Math.floor((now - session.startedAt) / 1000)
                 var level = 0
@@ -2210,6 +2249,9 @@
           if (!session || !session.recorder || session.stopping) return
           session.stopping = true
           session.elapsed = Math.max(0, Math.floor((Date.now() - session.startedAt) / 1000))
+          // 转写计时从这里开始：monitor（150ms 间隔）会持续把它写进状态行，
+          // 本机模型冷启动（standby → 拉起 worker）时用户能看到「已用时」，不是干等。
+          session.transcribeStartedAt = Date.now()
           if (session.timer) {
             window.clearInterval(session.timer)
             session.timer = 0
@@ -2218,7 +2260,7 @@
             window.clearTimeout(session.maxTimer)
             session.maxTimer = 0
           }
-          setVoice({ phase: 'transcribing', elapsed: session.elapsed, level: 0 })
+          setVoice({ phase: 'transcribing', elapsed: 0, level: 0 })
           var recorder = session.recorder
           var stopped = new Promise(function (resolve) {
             recorder.onstop = function () {
@@ -2264,7 +2306,9 @@
               setVoice({ phase: 'idle', elapsed: 0, level: 0 })
               setVoiceUsed(true)
               recordMetric('voice')
-              showToast({ kind: 'info', text: t('voice.done') }, 2600)
+              // 语音搜索已经直接筛好了，不需要再提示 Ctrl+Enter；两种落点用两句话。
+              var toDraft = voiceTargetRef.current !== 'search'
+              showToast({ kind: 'info', text: toDraft ? t('voice.done') : t('voice.done.search') }, toDraft ? 2600 : 2200)
             })
             .catch(function (error) {
               if (session.cancelled) return
@@ -2412,7 +2456,6 @@
           [t],
         )
 
-        var open = store.open
         var notes = useMemo(
           function () {
             return sortNotes(store.notes)
@@ -2487,8 +2530,10 @@
           [notes, search],
         )
         var searchable = notes.length >= SEARCH_THRESHOLD
-        // 搜索框的显示条件：够多、已有搜索词、或正在语音搜索/转写（头部麦克风随时可用）。
-        var searchVisible = searchable || Boolean(query) || voice.phase !== 'idle'
+        // 搜索框的显示条件：够多、已有搜索词、或正在「语音搜索」（头部麦克风随时可用）。
+        // 注意只认搜索目标：语音记一条时不该平白冒出一个搜索框。
+        var searchVisible =
+          searchable || Boolean(query) || (voice.phase !== 'idle' && voiceTargetRef.current === 'search')
 
         // 回顾条只在「今天挑的那条、还没关、还在、不是归档」时出现；
         // 搜索态与归档视图里让位——那时列表本身才是焦点。
@@ -3411,6 +3456,11 @@
           visibleCount > 0 ? h('span', { className: 'dsn-tab-count' }, visibleCount > 99 ? '99+' : String(visibleCount)) : null,
         )
 
+        // 三个麦克风按钮的门控（录音中 / 转写中 / 服务不可用 / 可用）
+        var headVoiceGate = voiceMicGate(t('voice.search'))
+        var composerVoiceGate = voiceMicGate(t('voice.mic'))
+        var searchVoiceGate = voiceMicGate(t('voice.search'))
+
         // 收起时连面板的元素都不构造：左边缘的便签标签是唯一常驻的部分。
         var panel = !open
           ? null
@@ -3429,18 +3479,16 @@
                 'button',
                 {
                   type: 'button',
-                  className:
-                    'dsn-icon-btn dsn-head-voice' +
-                    (voice.phase === 'recording' && voiceTargetRef.current === 'search' ? ' is-recording' : ''),
-                  title: voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
-                  'aria-label': voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
-                  disabled: voice.phase === 'idle' && !voiceCatalogUsable(voiceCatalog),
+                  className: 'dsn-icon-btn dsn-head-voice' + (headVoiceGate.recording ? ' is-recording' : ''),
+                  title: headVoiceGate.title,
+                  'aria-label': headVoiceGate.title,
+                  disabled: headVoiceGate.disabled,
                   onClick: function () {
                     if (voice.phase === 'recording') stopVoice()
                     else if (voice.phase === 'idle') startVoice('search')
                   },
                 },
-                voice.phase === 'recording' && voiceTargetRef.current === 'search' ? IconStop(14) : IconMic(14),
+                headVoiceGate.recording ? IconStop(14) : IconMic(14),
               ),
               h(
                 'button',
@@ -3539,7 +3587,7 @@
                       role: 'menuitem',
                       className: 'dsn-menu-item',
                       disabled: voice.phase !== 'idle' || !voiceCatalogUsable(voiceCatalog),
-                      title: voiceCatalogUsable(voiceCatalog) ? t('menu.voice') : voiceReasonText(voiceCatalog && voiceCatalog.reason),
+                      title: voiceCatalogUsable(voiceCatalog) ? t('menu.voice') : voiceReasonText(voiceCatalogReason()),
                       onClick: function () {
                         setMenuOpen(false)
                         startVoice()
@@ -3582,7 +3630,10 @@
                         Math.max(0, VOICE_MAX_SECONDS - voice.elapsed) +
                         ' ' +
                         t('voice.seconds')
-                      : t('voice.transcribing'),
+                      : t('voice.transcribing') +
+                        (voice.elapsed > 0
+                          ? ' · ' + t('voice.transcribingFor') + ' ' + formatClock(voice.elapsed)
+                          : ''),
                   ),
                   voice.phase === 'recording'
                     ? h(
@@ -3647,16 +3698,16 @@
                     'button',
                     {
                       type: 'button',
-                      className: 'dsn-icon-btn dsn-voice-mic' + (voice.phase === 'recording' ? ' is-recording' : ''),
-                      title: voice.phase === 'recording' ? t('voice.stop') : t('voice.mic'),
-                      'aria-label': voice.phase === 'recording' ? t('voice.stop') : t('voice.mic'),
-                      disabled: voice.phase === 'idle' && !voiceCatalogUsable(voiceCatalog),
+                      className: 'dsn-icon-btn dsn-voice-mic' + (composerVoiceGate.recording ? ' is-recording' : ''),
+                      title: composerVoiceGate.title,
+                      'aria-label': composerVoiceGate.title,
+                      disabled: composerVoiceGate.disabled,
                       onClick: function () {
                         if (voice.phase === 'recording') stopVoice()
                         else if (voice.phase === 'idle') startVoice()
                       },
                     },
-                    voice.phase === 'recording' ? IconStop(14) : IconMic(14),
+                    composerVoiceGate.recording ? IconStop(14) : IconMic(14),
                   )
                 : null,
               h(
@@ -3812,18 +3863,16 @@
                   'button',
                   {
                     type: 'button',
-                    className:
-                      'dsn-icon-btn dsn-search-voice' +
-                      (voice.phase === 'recording' && voiceTargetRef.current === 'search' ? ' is-recording' : ''),
-                    title: voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
-                    'aria-label': voice.phase === 'recording' && voiceTargetRef.current === 'search' ? t('voice.stop') : t('voice.search'),
-                    disabled: voice.phase === 'idle' && !voiceCatalogUsable(voiceCatalog),
+                    className: 'dsn-icon-btn dsn-search-voice' + (searchVoiceGate.recording ? ' is-recording' : ''),
+                    title: searchVoiceGate.title,
+                    'aria-label': searchVoiceGate.title,
+                    disabled: searchVoiceGate.disabled,
                     onClick: function () {
                       if (voice.phase === 'recording') stopVoice()
                       else if (voice.phase === 'idle') startVoice('search')
                     },
                   },
-                  voice.phase === 'recording' && voiceTargetRef.current === 'search' ? IconStop(14) : IconMic(14),
+                  searchVoiceGate.recording ? IconStop(14) : IconMic(14),
                 ),
                 query
                   ? h(

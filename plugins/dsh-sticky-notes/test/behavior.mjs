@@ -64,6 +64,8 @@ let voiceCatalogPayload = {
   },
 }
 let voiceTranscribePayload = { ok: true, text: '语音识别出的文本', audioSeconds: 2, inferenceSeconds: 0.1 }
+// 模拟「本机模型冷启动、转写迟迟不返回」：设成一个 Promise，转写请求会等它 resolve。
+let voiceTranscribeDelay = null
 let voiceFetchCalls = []
 let micError = null
 let micStreamStopped = 0
@@ -389,7 +391,10 @@ const sandbox = {
     const target = String(url)
     voiceFetchCalls.push({ url: target, init })
     if (target.indexOf('/voice/catalog') !== -1) return Promise.resolve({ json: () => Promise.resolve(voiceCatalogPayload) })
-    if (target.indexOf('/voice/transcribe') !== -1) return Promise.resolve({ json: () => Promise.resolve(voiceTranscribePayload) })
+    if (target.indexOf('/voice/transcribe') !== -1) {
+      const respond = () => Promise.resolve({ json: () => Promise.resolve(voiceTranscribePayload) })
+      return voiceTranscribeDelay ? Promise.resolve(voiceTranscribeDelay).then(respond) : respond()
+    }
     return Promise.reject(new Error('unexpected fetch: ' + target))
   },
   navigator: {
@@ -757,10 +762,12 @@ function closeButton() {
 }
 
 // 换一套数据重新挂载：搜索框要便签 ≥ 6 条才出现，另外放一条已归档的。
-function remount(nextNotes, props) {
+// openState 默认 '1'（真机退出时保留上次开合；默认测试都从展开态开始），
+// 传 '0' 可以覆盖「页面加载时面板是收起」这条真实路径。
+function remount(nextNotes, props, openState) {
   runtimeProps = props || {}
   storage.set('dsh-sticky-notes:v1', JSON.stringify({ notes: nextNotes }))
-  storage.set('dsh-sticky-notes:open', '1')
+  storage.set('dsh-sticky-notes:open', openState === undefined ? '1' : String(openState))
   hookSlots = []
   refSlots = []
   effectSlots = []
@@ -1975,6 +1982,87 @@ check('点重试后重新进入录音态', Boolean(voiceRow()), true)
 pressKey({ key: 'Escape' })
 voiceTranscribePayload = previousVoiceTranscribe
 
+// ⑤ 面板初始收起：open 相关 effect 的依赖必须跟得上（修 0.1.24 一直灰的根因）
+//
+// 真机上「页面加载时面板是收起」是常见路径：catalog effect 若拿不到 open 的新值，
+// 就只在挂载时跑一次（open=false 直接返回），之后打开面板也不会请求 catalog。
+storage.delete('dsh-sticky-notes:draft')
+const catalogCallsBeforeClosedMount = voiceFetchTargets().filter((url) => url.indexOf('/voice/catalog') !== -1).length
+remount(voiceSeed, {}, '0')
+await settleVoice()
+check('面板收起时不请求 catalog', voiceFetchTargets().filter((url) => url.indexOf('/voice/catalog') !== -1).length, catalogCallsBeforeClosedMount)
+check('收起时没有面板', elements.some((el) => el.props.className === 'dsn-panel'), false)
+act(() => {
+  const tab = tabButton()
+  if (tab) tab.props.onClick({})
+})
+await settleVoice()
+check(
+  '从收起打开后请求一次 catalog',
+  voiceFetchTargets().filter((url) => url.indexOf('/voice/catalog') !== -1).length,
+  catalogCallsBeforeClosedMount + 1,
+)
+const headAfterOpen = elements.find((el) => String(el.props.className || '').indexOf('dsn-head-voice') !== -1)
+check('从收起打开后头部麦克风可用', Boolean(headAfterOpen && headAfterOpen.props.disabled), false)
+// 同一个根因还影响编辑焦点跟踪：打开后点正文应能进入编辑态（Esc 取消编辑）。
+focusinNote('v1')
+check('从收起打开后点正文进入编辑态', Boolean(editHint()), true)
+pressKey({ key: 'Escape' })
+check('取消编辑后面板还在', elements.some((el) => el.props.className === 'dsn-panel'), true)
+act(() => menuButton().props.onClick({}))
+const entryAfterOpen = menuItems()[4]
+check('从收起打开后语音入口可用', Boolean(entryAfterOpen && entryAfterOpen.props.disabled), false)
+pressKey({ key: 'Escape' })
+
+// ⑥ 语音搜索成功的提示不该再叫用户按 Ctrl+Enter
+voiceTranscribePayload = { ok: true, text: '语音筛出来的想法', audioSeconds: 1, inferenceSeconds: 0.05 }
+storage.delete('dsh-sticky-notes:draft')
+remount(voiceSearchSeed)
+await settleVoice()
+act(() => {
+  if (voiceSearchButton()) voiceSearchButton().props.onClick()
+})
+await settleVoice()
+act(() => {
+  if (voiceStopButton()) voiceStopButton().props.onClick()
+})
+await settleVoice()
+check('语音搜索成功提示是「已按语音筛选」', flattenText(toastEl()), '已按语音筛选')
+check('语音搜索提示不出现 Ctrl+Enter', String(flattenText(toastEl())).indexOf('Ctrl+Enter'), -1)
+
+// ⑦ 语音记一条时不应平白冒出搜索框（只有语音搜索才临时显示）
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+act(() => menuItems()[4].props.onClick())
+await settleVoice()
+check('语音记一条时没有搜索框', Boolean(searchInput()), false)
+pressKey({ key: 'Escape' })
+
+// ⑧ 转写中显示已用时（本机模型 standby 冷启动时用户不干等）
+storage.delete('dsh-sticky-notes:draft')
+voiceTranscribePayload = { ok: true, text: '冷启动后的结果', audioSeconds: 1, inferenceSeconds: 0.05 }
+let releaseTranscribe = null
+voiceTranscribeDelay = new Promise((resolve) => {
+  releaseTranscribe = resolve
+})
+remount(voiceSeed)
+await settleVoice()
+act(() => menuButton().props.onClick({}))
+act(() => menuItems()[4].props.onClick())
+await settleVoice()
+act(() => {
+  if (voiceStopButton()) voiceStopButton().props.onClick()
+})
+await settleVoice()
+advance(2100)
+check('转写中显示已用时', String(flattenText(voiceRow())).indexOf('已用时') !== -1, true)
+releaseTranscribe()
+voiceTranscribeDelay = null
+await settleVoice()
+check('转写完成后草稿拿到文本', draftArea().props.value, '冷启动后的结果')
+voiceTranscribePayload = previousVoiceTranscribe
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -1983,5 +2071,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）/ 语音入口回归（面板初始收起也能请求 catalog / 编辑焦点恢复）/ 语音提示（搜索成功文案 / 记一条不弹搜索框 / 转写中显示已用时）',
 )
