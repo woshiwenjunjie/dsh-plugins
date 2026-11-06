@@ -192,6 +192,11 @@ else {
     if (css.indexOf('.dsn-search-voice') === -1) problems.push('缺少搜索框语音按钮样式')
     if (css.indexOf('.dsn-head-voice') === -1) problems.push('缺少头部语音搜索按钮样式')
     if (css.indexOf('.dsn-voice-level-fill') === -1) problems.push('缺少录音电平条样式')
+    if (css.indexOf('.dsn-root[data-side="right"] .dsn-panel') === -1) problems.push('缺少右停靠面板镜像样式')
+    if (css.indexOf('.dsn-root[data-mode="float"] .dsn-panel') === -1) problems.push('缺少自由摆放面板样式')
+    if (css.indexOf('@keyframes dsn-slide-right') === -1) problems.push('缺少右停靠滑入动画')
+    if (css.indexOf('.dsn-resize{') === -1) problems.push('缺少拖拽调宽度样式')
+    if (css.indexOf('.dsn-layout-card{') === -1) problems.push('缺少布局卡样式')
   }
   if (!registered) problems.push('没有注册任何 slot 组件')
   else {
@@ -234,11 +239,22 @@ else {
       problems.push('置顶便签没有排到第一位：' + (firstCardText && firstCardText.props.value))
     }
 
-    // 左列宽度应该被量到，并写到根节点的 --dsn-left 上。
+    // 左列宽度应该被量到，并写到根节点的 --dsn-left 上；布局偏好三件套也要有。
     const root = elements.find((el) => el.props && String(el.props.className || '').indexOf('dsn-root') === 0)
     if (!root) problems.push('没找到根节点')
-    else if (!root.props.style || root.props.style['--dsn-left'] !== SIDEBAR_RIGHT + 'px') {
-      problems.push('根节点没有把左列宽度写进 --dsn-left：' + JSON.stringify(root.props.style))
+    else {
+      if (!root.props.style || root.props.style['--dsn-left'] !== SIDEBAR_RIGHT + 'px') {
+        problems.push('根节点没有把左列宽度写进 --dsn-left：' + JSON.stringify(root.props.style))
+      }
+      if (!root.props.style || root.props.style['--dsn-right'] !== '0px') {
+        problems.push('根节点没有把右边距写进 --dsn-right：' + JSON.stringify(root.props.style))
+      }
+      if (!root.props.style || root.props.style['--dsn-width'] !== '300px') {
+        problems.push('根节点没有默认宽度 --dsn-width：' + JSON.stringify(root.props.style))
+      }
+      if (root.props['data-side'] !== 'left' || root.props['data-mode'] !== 'dock') {
+        problems.push('默认布局不是左停靠：' + root.props['data-side'] + '/' + root.props['data-mode'])
+      }
     }
 
     // 收起状态：只剩左边缘的竖排标签，不该再渲染面板。

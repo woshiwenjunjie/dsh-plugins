@@ -71,6 +71,9 @@ let micError = null
 let micStreamStopped = 0
 // 假麦克风电平：模拟「说话」0.4 / 静音 0，用来测电平条和静音自动停。
 let fakeVoiceLevel = 0
+// 右侧栏（dsh-client-ui-sidebar-right）打开时的左边界；0 = 没打开。
+// 右停靠/自由摆放在真机上要避开它，测试里靠这个量 right inset。
+let rightSidebarLeft = 0
 // 组件收到的 props：真环境里是 slot 的标准 kit（含 useSessions），测试里可以模拟。
 let runtimeProps = {}
 // 每个渲染 pass 真正渲染了几张卡片：用来验证 memo 生效（打字只该重渲染 1 张）。
@@ -352,6 +355,10 @@ const sandbox = {
     removeEventListener: removeDocumentListener,
     querySelector: (selector) => {
       if (selector === '[data-dsh-sidebar-root]') return { getBoundingClientRect: () => ({ right: 248 }) }
+      // 右侧栏：打开时它的左边界决定「右边距」，右停靠/自由摆放都要避开。
+      if (selector === '[data-sidebar-right-open]') {
+        return rightSidebarLeft ? { getBoundingClientRect: () => ({ left: rightSidebarLeft }) } : null
+      }
       // 组件里用 document.querySelector('[data-dsn-note="id"] textarea') 找正文（铅笔入口聚焦）。
       // 假 DOM 没有节点树：卡片文章节点和正文按渲染顺序各排一列，两边都是便签顺序，按下标配对即可。
       const match = /^\[data-dsn-note="([^"]+)"\] textarea$/.exec(String(selector))
@@ -772,6 +779,7 @@ function remount(nextNotes, props, openState) {
   refSlots = []
   effectSlots = []
   timers.clear()
+  rightSidebarLeft = 0
   // 卸载会移除组件挂在 window / document 上的监听；重挂载相当于重新开始，旧的不能留。
   windowListeners.clear()
   documentListeners.clear()
@@ -962,7 +970,7 @@ const roundTripSeed = [
 remount(roundTripSeed)
 
 act(() => menuButton().props.onClick({}))
-check('「更多」菜单有五项（备份 / 恢复 / 重排 / 从剪贴板记下 / 语音记一条）', menuItems().length, 5)
+check('「更多」菜单有六项（备份 / 恢复 / 重排 / 从剪贴板记下 / 语音记一条 / 布局…）', menuItems().length, 6)
 
 // 导出 → 清空 → 导入，字段要一模一样
 await actAsync(() => menuItems()[0].props.onClick({}))
@@ -1761,7 +1769,7 @@ check('没用过语音时草稿框没有麦克风', Boolean(voiceMicButton()), f
 
 // 入口：⋯ 菜单最后一项，catalog 可用时不禁用
 act(() => menuButton().props.onClick({}))
-check('「更多」菜单多了语音入口（5 项）', menuItems().length, 5)
+check('「更多」菜单多了语音入口（6 项）', menuItems().length, 6)
 const voiceEntry = menuItems()[4]
 check('语音入口文案', flattenText(voiceEntry && voiceEntry.props.children), '语音记一条')
 check('catalog 可用时语音入口可用', Boolean(voiceEntry && voiceEntry.props.disabled), false)
@@ -2063,6 +2071,167 @@ await settleVoice()
 check('转写完成后草稿拿到文本', draftArea().props.value, '冷启动后的结果')
 voiceTranscribePayload = previousVoiceTranscribe
 
+// ---------------------------------------------------------------- 布局自由度（功能 5）
+//
+// 停靠侧 / 宽度 / 自由摆放；偏好只写独立的 prefs key，不碰 notes 数据。
+
+storage.delete('dsh-sticky-notes:prefs:v1')
+rightSidebarLeft = 0
+remount(voiceSeed)
+await settleVoice()
+
+function rootEl() {
+  return elements.find((el) => String(el.props.className || '').indexOf('dsn-root') === 0)
+}
+function prefsOf() {
+  const raw = storage.get('dsh-sticky-notes:prefs:v1')
+  return raw ? JSON.parse(raw) : null
+}
+function layoutPrefs() {
+  const prefs = prefsOf()
+  return prefs && prefs.layout ? prefs.layout : {}
+}
+function layoutCardEl() {
+  return elements.find((el) => el.props.className === 'dsn-layout-card')
+}
+function layoutBtn(label) {
+  return elements.find(
+    (el) =>
+      el.type === 'button' &&
+      String(el.props.className || '').indexOf('dsn-layout-btn') === 0 &&
+      flattenText(el) === label,
+  )
+}
+function clickLayout(label) {
+  const btn = layoutBtn(label)
+  if (btn) act(() => btn.props.onClick())
+}
+function openLayoutCard() {
+  act(() => menuButton().props.onClick({}))
+  const entry = menuItems()[5]
+  if (entry) act(() => entry.props.onClick())
+  flush()
+}
+function dispatchWindow(type, patch) {
+  fireWindow(type, patch)
+  flush()
+}
+/** 只派发给监听、不立刻重渲染：用来断言「拖动过程只改 DOM」。 */
+function fireWindow(type, patch) {
+  const event = Object.assign({ preventDefault() {}, stopPropagation() {} }, patch)
+  for (const listener of (windowListeners.get(type) || []).slice()) listener(event)
+}
+
+check(
+  '默认布局：左停靠 / 标准 300 / 右边距 0',
+  [rootEl().props['data-side'], rootEl().props['data-mode'], rootEl().props.style['--dsn-width'], rootEl().props.style['--dsn-right']].join('|'),
+  'left|dock|300px|0px',
+)
+check('默认没有布局卡', Boolean(layoutCardEl()), false)
+act(() => menuButton().props.onClick({}))
+check('菜单最后一项是「布局…」', flattenText(menuItems()[5]), '布局…')
+const layoutEntry = menuItems()[5]
+if (layoutEntry) act(() => layoutEntry.props.onClick())
+check('「布局…」打开布局卡', Boolean(layoutCardEl()), true)
+clickLayout('右侧')
+check('切右停靠：根节点 data-side=right', rootEl().props['data-side'], 'right')
+check('切右停靠写进 prefs', layoutPrefs().side, 'right')
+check('布局变化给读屏播报', flattenText(elements.find((el) => el.props.className === 'dsn-sr')), '已停靠到右侧')
+
+// 右侧栏打开：右停靠要避让，边距 = 视口宽 - 右侧栏左边界
+rightSidebarLeft = 900
+dispatchWindow('resize', {})
+check('右侧栏打开时右停靠自动避让', rootEl().props.style['--dsn-right'], '500px')
+rightSidebarLeft = 0
+dispatchWindow('resize', {})
+check('右侧栏关闭后右边距归零', rootEl().props.style['--dsn-right'], '0px')
+
+// 宽度三档
+clickLayout('宽')
+check('宽度档位写进根节点', rootEl().props.style['--dsn-width'], '360px')
+check('宽度写进 prefs', layoutPrefs().width, 360)
+clickLayout('紧凑')
+check('紧凑 = 260', rootEl().props.style['--dsn-width'], '260px')
+
+// 自由摆放：拖标题移动（过程只改 DOM，松手写 x/y）
+clickLayout('自由')
+check('切自由模式', rootEl().props['data-mode'], 'float')
+const floatPanel = elements.find((el) => el.props.className === 'dsn-panel is-float')
+check('自由模式面板有独立宽高', Boolean(floatPanel) && String(floatPanel.props.style.height).indexOf('px') !== -1, true)
+
+const dragHeading = elements.find((el) => el.props.className === 'dsn-heading')
+if (dragHeading && typeof dragHeading.props.onPointerDown === 'function') {
+  act(() => dragHeading.props.onPointerDown({ button: 0, clientX: 0, clientY: 0, preventDefault() {} }))
+}
+const floatPanelNow = elements.find((el) => el.props.className === 'dsn-panel is-float')
+fireWindow('pointermove', { clientX: 600, clientY: 320 })
+check('拖动过程直接改 DOM 位置（不重渲染卡片）', floatPanelNow && floatPanelNow.style.left, '600px')
+check('拖动过程没有重渲染卡片', maxPassCardRenders, 0)
+dispatchWindow('pointerup', {})
+check('拖动松手写进 prefs 的 x/y', [layoutPrefs().x, layoutPrefs().y].join(','), '600,320')
+
+// 拖到右边缘：吸附回右停靠
+const dragHeading2 = elements.find((el) => el.props.className === 'dsn-heading')
+if (dragHeading2 && typeof dragHeading2.props.onPointerDown === 'function') {
+  act(() => dragHeading2.props.onPointerDown({ button: 0, clientX: 0, clientY: 0, preventDefault() {} }))
+}
+dispatchWindow('pointermove', { clientX: 1300, clientY: 320 })
+dispatchWindow('pointerup', {})
+check(
+  '拖到右边缘吸附回右停靠',
+  [rootEl().props['data-mode'], rootEl().props['data-side']].join('|'),
+  'dock|right',
+)
+
+// 重置
+const resetBtn = elements.find((el) => el.props.className === 'dsn-layout-reset')
+if (resetBtn) act(() => resetBtn.props.onClick())
+check(
+  '重置回左停靠 / 标准宽度',
+  [rootEl().props['data-side'], rootEl().props['data-mode'], rootEl().props.style['--dsn-width']].join('|'),
+  'left|dock|300px',
+)
+check('重置写进 prefs', layoutPrefs().width, 300)
+
+// 拖内边缘调宽度（默认左停靠：右边缘）
+const resizeHandle = elements.find((el) => el.props.className === 'dsn-resize')
+if (resizeHandle) {
+  act(() => resizeHandle.props.onPointerDown({ button: 0, clientX: 500, preventDefault() {}, stopPropagation() {} }))
+}
+const resizePanelNow = elements.find((el) => el.props.className === 'dsn-panel')
+fireWindow('pointermove', { clientX: 560 })
+check('拖内边缘实时改宽度', resizePanelNow && resizePanelNow.style.width, '360px')
+dispatchWindow('pointerup', {})
+check('松手把宽度写进 prefs', layoutPrefs().width, 360)
+const resizeHandle2 = elements.find((el) => el.props.className === 'dsn-resize')
+if (resizeHandle2 && typeof resizeHandle2.props.onKeyDown === 'function') {
+  act(() => resizeHandle2.props.onKeyDown({ key: 'ArrowRight', preventDefault() {} }))
+}
+check('键盘 → 每次加 20px', layoutPrefs().width, 380)
+
+// 偏好持久化：重新挂载后恢复
+openLayoutCard()
+clickLayout('右侧')
+remount(voiceSeed)
+await settleVoice()
+check(
+  '重新挂载后读取布局偏好',
+  [rootEl().props['data-side'], rootEl().props.style['--dsn-width']].join('|'),
+  'right|380px',
+)
+check('布局偏好不影响便签数据', JSON.parse(storage.get('dsh-sticky-notes:v1')).notes.length, voiceSeed.length)
+
+// 另一个标签页改了布局：本页跟着变
+storage.set(
+  'dsh-sticky-notes:prefs:v1',
+  JSON.stringify({ v: 1, layout: { mode: 'dock', side: 'left', width: 300, x: null, y: null } }),
+)
+dispatchWindow('storage', { key: 'dsh-sticky-notes:prefs:v1' })
+check('另一标签页改布局，本页跟随', rootEl().props['data-side'], 'left')
+
+storage.delete('dsh-sticky-notes:prefs:v1')
+rightSidebarLeft = 0
+
 // ---------------------------------------------------------------- 结果
 
 if (failures.length > 0) {
@@ -2071,5 +2240,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）/ 语音入口回归（面板初始收起也能请求 catalog / 编辑焦点恢复）/ 语音提示（搜索成功文案 / 记一条不弹搜索框 / 转写中显示已用时）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）/ 语音入口回归（面板初始收起也能请求 catalog / 编辑焦点恢复）/ 语音提示（搜索成功文案 / 记一条不弹搜索框 / 转写中显示已用时）/ 布局自由度（左右停靠 / 右侧栏避让 / 宽度档位 + 拖拽 + 键盘 / 自由摆放拖动与吸附 / 重置 / 偏好持久化与多标签页同步）',
 )

@@ -63,6 +63,15 @@
       var STORAGE_KEY = 'dsh-sticky-notes:v1'
       var OPEN_KEY = 'dsh-sticky-notes:open'
       var DRAFT_KEY = 'dsh-sticky-notes:draft'
+      // 布局偏好单独一个 key（功能 4 的自定义快捷键以后也放这里，全插件只新增这一个 key）。
+      // 它不参与 notes 的整份覆盖写，旧标签页不认识也不会把它吞掉。
+      var PREFS_KEY = 'dsh-sticky-notes:prefs:v1'
+      var LAYOUT_MIN_WIDTH = 260
+      var LAYOUT_MAX_WIDTH = 420
+      var LAYOUT_DEFAULT_WIDTH = 300
+      // 拖到离左右边缘这么近就吸附回停靠。
+      var LAYOUT_EDGE_SNAP = 24
+      var LAYOUT_MARGIN = 8
       // 回顾条：每天挑一条「旧」便签看一眼。只存「今天挑了谁、关没关」，不进便签数据。
       var REVIEW_KEY = 'dsh-sticky-notes:review'
       // 至少两小时没动过才算「旧」；最近三条不参与（刚写过的不需要被回顾）。
@@ -181,6 +190,57 @@
           window.localStorage.setItem(OPEN_KEY, open ? '1' : '0')
         } catch (error) {
           // 开合状态存不下不影响便签本身，忽略。
+        }
+      }
+
+      // ------------------------------------------------------------ 布局偏好
+      //
+      // { v:1, layout:{ mode:'dock'|'float', side:'left'|'right', width, x, y } }
+      // x/y 是自由模式面板左上角（相对视口，px）；null 表示还没摆过。
+      // 逐字段校验：坏数据回默认，不抛异常；写入时保留以后可能加的 shortcuts 字段。
+
+      function defaultLayout() {
+        return { mode: 'dock', side: 'left', width: LAYOUT_DEFAULT_WIDTH, x: null, y: null }
+      }
+
+      function normalizeLayout(input) {
+        var layout = defaultLayout()
+        if (!input || typeof input !== 'object') return layout
+        if (input.mode === 'float') layout.mode = 'float'
+        if (input.side === 'right') layout.side = 'right'
+        var width = Number(input.width)
+        if (isFinite(width) && width > 0) {
+          layout.width = Math.max(LAYOUT_MIN_WIDTH, Math.min(LAYOUT_MAX_WIDTH, Math.round(width)))
+        }
+        if (layout.mode === 'float') {
+          var x = Number(input.x)
+          var y = Number(input.y)
+          if (isFinite(x)) layout.x = Math.round(x)
+          if (isFinite(y)) layout.y = Math.round(y)
+        }
+        return layout
+      }
+
+      function readPrefs() {
+        var fallback = { v: 1, layout: defaultLayout() }
+        try {
+          var raw = window.localStorage.getItem(PREFS_KEY)
+          if (!raw) return fallback
+          var parsed = JSON.parse(raw)
+          if (!parsed || typeof parsed !== 'object' || parsed.v !== 1) return fallback
+          var prefs = { v: 1, layout: normalizeLayout(parsed.layout) }
+          if (parsed.shortcuts && typeof parsed.shortcuts === 'object') prefs.shortcuts = parsed.shortcuts
+          return prefs
+        } catch (error) {
+          return fallback
+        }
+      }
+
+      function writePrefs(prefs) {
+        try {
+          window.localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
+        } catch (error) {
+          // 布局存不下不影响便签本身；下次打开回到默认，不打断当前界面。
         }
       }
 
@@ -666,6 +726,25 @@
         'menu.restore': '从备份恢复…',
         'menu.clipboard': '从剪贴板记下（先进草稿）',
         'menu.voice': '语音记一条',
+        'menu.layout': '布局…',
+        'layout.title': '布局',
+        'layout.position': '位置',
+        'layout.left': '左侧',
+        'layout.right': '右侧',
+        'layout.float': '自由',
+        'layout.width': '宽度',
+        'layout.compact': '紧凑',
+        'layout.normal': '标准',
+        'layout.wide': '宽',
+        'layout.reset': '重置位置',
+        'layout.hint': '拖动标题栏移动，靠近左右边缘会自动吸附',
+        'layout.resize': '调整宽度',
+        'layout.leftAnnounce': '已停靠到左侧',
+        'layout.rightAnnounce': '已停靠到右侧',
+        'layout.floatAnnounce': '已切换为自由摆放',
+        'layout.widthAnnounce': '已调整面板宽度',
+        'layout.resetAnnounce': '已恢复默认布局',
+        'layout.resetTitle': '双击恢复默认位置',
         'toast.imported': '已导入',
         'toast.updated': '更新',
         'toast.backedUp': '备份已导出',
@@ -795,6 +874,25 @@
         'menu.restore': 'Restore from backup…',
         'menu.clipboard': 'Capture clipboard into draft',
         'menu.voice': 'Dictate a note',
+        'menu.layout': 'Layout…',
+        'layout.title': 'Layout',
+        'layout.position': 'Position',
+        'layout.left': 'Left',
+        'layout.right': 'Right',
+        'layout.float': 'Free',
+        'layout.width': 'Width',
+        'layout.compact': 'Compact',
+        'layout.normal': 'Standard',
+        'layout.wide': 'Wide',
+        'layout.reset': 'Reset position',
+        'layout.hint': 'Drag the title bar to move; drop near an edge to dock',
+        'layout.resize': 'Resize panel',
+        'layout.leftAnnounce': 'Docked to the left',
+        'layout.rightAnnounce': 'Docked to the right',
+        'layout.floatAnnounce': 'Free placement enabled',
+        'layout.widthAnnounce': 'Panel width changed',
+        'layout.resetAnnounce': 'Default layout restored',
+        'layout.resetTitle': 'Double-click to restore the default position',
         'toast.imported': 'Imported',
         'toast.updated': 'updated',
         'toast.backedUp': 'Backup exported',
@@ -988,6 +1086,29 @@
         }
       }
 
+      /**
+       * 右侧栏（dsh-client-ui-sidebar-right）的宽度。它是 dockkit 面板：打开时容器带
+       * `data-sidebar-right-open`，宽度由用户拖拽/持久化决定（实测可能 400–700px）。
+       * 右停靠与自由摆放都要避开它，所以量「视口右边界到面板左边界」的距离。
+       * 没打开、量不到、或宽得离谱时退回 0。
+       */
+      function measureRightInset() {
+        try {
+          if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return 0
+          var panel = document.querySelector('[data-sidebar-right-open]')
+          if (!panel || typeof panel.getBoundingClientRect !== 'function') return 0
+          var rect = panel.getBoundingClientRect()
+          var viewport = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : 0
+          if (!viewport || !rect) return 0
+          var inset = viewport - Math.round(rect.left)
+          if (!isFinite(inset) || inset <= 0) return 0
+          if (inset > viewport * 0.7) return 0
+          return inset
+        } catch (error) {
+          return 0
+        }
+      }
+
       // ------------------------------------------------------------ 时间格式
 
       function pad2(n) {
@@ -1086,6 +1207,18 @@
           return svg(
             [
               h('path', { key: 'a', d: 'M10 6h.01M14 6h.01M10 12h.01M14 12h.01M10 18h.01M14 18h.01' }),
+            ],
+            s,
+          )
+        }, size)
+      }
+
+      function IconLayout(size) {
+        return pick('IconLayoutOutlineRegular', function (s) {
+          return svg(
+            [
+              h('path', { key: 'a', d: 'M4 5.5h16v13H4z' }),
+              h('path', { key: 'b', d: 'M9.5 5.5v13' }),
             ],
             s,
           )
@@ -1865,6 +1998,9 @@
         // 都会在该行之前求值、永远拿到 undefined，effect 便只在挂载时跑一次
         // （语音 catalog 就是这样从不请求、入口一直灰的）。
         var open = store.open
+        // 布局偏好：停靠侧 / 宽度 / 自由摆放位置（独立 key，不进便签数据）。
+        var [prefs, setPrefs] = useState(readPrefs)
+        var layout = prefs.layout
         var [draft, setDraft] = useState(readDraft)
         var [tick, setTick] = useState(Date.now())
         var [dirty, setDirty] = useState(false)
@@ -1892,11 +2028,16 @@
         var [undoState, setUndoState] = useState(null)
         // 备份菜单（低频操作收进「更多」，头部按钮数量不变）。
         var [menuOpen, setMenuOpen] = useState(false)
+        // 布局小卡（⋯→「布局…」）与读屏播报文案。
+        var [layoutOpen, setLayoutOpen] = useState(false)
+        var [layoutAnnounce, setLayoutAnnounce] = useState('')
         // 回顾条：今天挑中的那条旧便签 { day, id, hidden } 与它的展开态。
         var [review, setReview] = useState(readReview)
         var [reviewExpanded, setReviewExpanded] = useState(false)
         // 左列右边界：便签栏贴着它展开，不压住会话列表。
         var [leftInset, setLeftInset] = useState(measureSidebarLeft)
+        // 右侧栏占宽：右停靠/自由摆放要避开它，不盖住文件预览/终端。
+        var [rightInset, setRightInset] = useState(measureRightInset)
         var saveTimer = useRef(0)
         var undoTimer = useRef(0)
         var panelRef = useRef(null)
@@ -1905,6 +2046,12 @@
         var draftRef = useRef(null)
         var menuRef = useRef(null)
         var menuBtnRef = useRef(null)
+        var layoutCardRef = useRef(null)
+        // 拖动面板（自由模式）与拖内边缘调宽度：移动过程只改 DOM，松手才写状态。
+        var layoutDragRef = useRef(null)
+        var widthDragRef = useRef(null)
+        // 上一次写进 localStorage 的偏好序列化结果：避免挂载就写入、也避免多标签页互相回写。
+        var prefsPersistedRef = useRef(JSON.stringify(prefs))
         var fileRef = useRef(null)
         // 拖动排序的源 id：拖动过程中只改这个 ref，不触发整列表重渲染。
         var dragSourceRef = useRef(null)
@@ -2587,6 +2734,283 @@
           [open],
         )
 
+        // 右侧栏宽度会变（开关、拖分隔条、切换 push/overlay），跟着量。
+        // 右停靠与自由摆放都靠它避让，否则会盖住文件预览/终端。
+        useEffect(
+          function () {
+            function sync() {
+              var next = measureRightInset()
+              setRightInset(function (prev) {
+                return prev === next ? prev : next
+              })
+            }
+            sync()
+            window.addEventListener('resize', sync)
+            var observer = null
+            var mutation = null
+            var node =
+              typeof document !== 'undefined' && typeof document.querySelector === 'function'
+                ? document.querySelector('[data-sidebar-right-open]')
+                : null
+            if (node && typeof window.ResizeObserver === 'function') {
+              observer = new window.ResizeObserver(sync)
+              observer.observe(node)
+            }
+            // 开关只改属性、宽度没变时 ResizeObserver 不触发，所以属性变化也要听。
+            if (typeof window.MutationObserver === 'function' && typeof document !== 'undefined' && document.documentElement) {
+              mutation = new window.MutationObserver(sync)
+              mutation.observe(document.documentElement, {
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['data-sidebar-right-open'],
+              })
+            }
+            return function () {
+              window.removeEventListener('resize', sync)
+              if (observer) observer.disconnect()
+              if (mutation) mutation.disconnect()
+            }
+          },
+          [open],
+        )
+
+        // 偏好变化写回 localStorage（挂载时不写；多标签页同步来的值也不回写）。
+        useEffect(
+          function () {
+            var serialized = JSON.stringify(prefs)
+            if (prefsPersistedRef.current === serialized) return
+            prefsPersistedRef.current = serialized
+            writePrefs(prefs)
+          },
+          [prefs],
+        )
+
+        // 另一个标签页改了布局：本页跟着变（只读，不再写回，避免来回覆盖）。
+        useEffect(function () {
+          function onStorage(event) {
+            if (!event || event.key !== PREFS_KEY) return
+            var next = readPrefs()
+            var serialized = JSON.stringify(next)
+            if (prefsPersistedRef.current === serialized) return
+            prefsPersistedRef.current = serialized
+            setPrefs(next)
+          }
+          window.addEventListener('storage', onStorage)
+          return function () {
+            window.removeEventListener('storage', onStorage)
+          }
+        }, [])
+
+        // ---------------------------------------------------------- 布局
+        //
+        // 三种形态：左停靠（默认）/ 右停靠 / 自由摆放。自由模式拖标题栏移动，
+        // 靠近左右边缘吸附回停靠；拖动过程只改 DOM，松手才写 prefs（不重渲染卡片）。
+
+        var viewportWidth = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : 0
+        var viewportHeight = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 0
+        // 面板宽度上限：两边侧栏都要让开，再留 24px 呼吸。
+        var panelMaxWidth = Math.max(LAYOUT_MIN_WIDTH, viewportWidth - leftInset - rightInset - 24)
+        var panelWidth = Math.min(layout.width, panelMaxWidth)
+
+        function clampNumber(value, min, max) {
+          return Math.max(min, Math.min(max, value))
+        }
+        function clampFloatX(x, width) {
+          var min = leftInset + LAYOUT_MARGIN
+          var max = viewportWidth - rightInset - width - LAYOUT_MARGIN
+          if (max < min) return min
+          return clampNumber(x, min, max)
+        }
+        function floatHeight() {
+          return Math.min(
+            Math.max(320, Math.round(viewportHeight * 0.7)),
+            Math.max(320, viewportHeight - LAYOUT_MARGIN * 2),
+          )
+        }
+        function clampFloatY(y, height) {
+          var min = LAYOUT_MARGIN
+          var max = viewportHeight - height - LAYOUT_MARGIN
+          if (max < min) return min
+          return clampNumber(y, min, max)
+        }
+        /** 自由模式当前该画在哪：x/y 来自偏好，渲染时夹回视口（不改用户原始坐标）。 */
+        function floatRect() {
+          var height = floatHeight()
+          var x =
+            typeof layout.x === 'number'
+              ? layout.x
+              : layout.side === 'right'
+                ? viewportWidth - rightInset - panelWidth - LAYOUT_EDGE_SNAP
+                : leftInset + LAYOUT_EDGE_SNAP
+          var y = typeof layout.y === 'number' ? layout.y : Math.round((viewportHeight - height) / 2)
+          return { x: clampFloatX(x, panelWidth), y: clampFloatY(y, height), width: panelWidth, height: height }
+        }
+
+        function updateLayout(patch, announce) {
+          setPrefs(function (prev) {
+            return { v: 1, shortcuts: prev.shortcuts, layout: normalizeLayout(Object.assign({}, prev.layout, patch)) }
+          })
+          if (announce) setLayoutAnnounce(announce)
+        }
+
+        function chooseLayoutMode(mode) {
+          if (mode === 'float') {
+            var rect = floatRect()
+            updateLayout({ mode: 'float', x: rect.x, y: rect.y }, t('layout.floatAnnounce'))
+            return
+          }
+          updateLayout(
+            { mode: 'dock', side: mode === 'right' ? 'right' : 'left' },
+            mode === 'right' ? t('layout.rightAnnounce') : t('layout.leftAnnounce'),
+          )
+        }
+
+        function chooseWidth(width) {
+          updateLayout({ width: width }, t('layout.widthAnnounce'))
+        }
+
+        /** 布局卡里的位置按钮：左侧停靠 / 右侧停靠 / 自由。 */
+        function layoutPositionButton(mode, label, active) {
+          return h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsn-layout-btn' + (active ? ' is-active' : ''),
+              'aria-pressed': active ? 'true' : 'false',
+              onClick: function () {
+                chooseLayoutMode(mode)
+              },
+            },
+            label,
+          )
+        }
+
+        /** 布局卡里的宽度按钮：紧凑 / 标准 / 宽。 */
+        function layoutWidthButton(width, label, active) {
+          return h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsn-layout-btn' + (active ? ' is-active' : ''),
+              'aria-pressed': active ? 'true' : 'false',
+              onClick: function () {
+                chooseWidth(width)
+              },
+            },
+            label,
+          )
+        }
+
+        function resetLayout() {
+          setPrefs(function (prev) {
+            return { v: 1, shortcuts: prev.shortcuts, layout: defaultLayout() }
+          })
+          setLayoutAnnounce(t('layout.resetAnnounce'))
+          setLayoutOpen(false)
+        }
+
+        /** 自由摆放：按住标题区拖动（只在 float 模式）。 */
+        function onHeadPointerDown(event) {
+          if (layout.mode !== 'float' || !event || event.button !== 0) return
+          var panel = panelRef.current
+          if (!panel || typeof panel.getBoundingClientRect !== 'function') return
+          var rect = panel.getBoundingClientRect()
+          layoutDragRef.current = {
+            startX: event.clientX,
+            startY: event.clientY,
+            x: rect.left,
+            y: rect.top,
+            width: rect.width || panelWidth,
+            height: rect.height || floatHeight(),
+            lastX: rect.left,
+            lastY: rect.top,
+            moved: false,
+          }
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          window.addEventListener('pointermove', onHeadPointerMove)
+          window.addEventListener('pointerup', onHeadPointerUp)
+          window.addEventListener('pointercancel', onHeadPointerUp)
+        }
+
+        function onHeadPointerMove(event) {
+          var state = layoutDragRef.current
+          var panel = panelRef.current
+          if (!state || !panel) return
+          var dx = event.clientX - state.startX
+          var dy = event.clientY - state.startY
+          if (!state.moved && Math.abs(dx) + Math.abs(dy) < 3) return
+          state.moved = true
+          state.lastX = clampFloatX(state.x + dx, state.width)
+          state.lastY = clampFloatY(state.y + dy, state.height)
+          panel.style.left = state.lastX + 'px'
+          panel.style.top = state.lastY + 'px'
+        }
+
+        function onHeadPointerUp() {
+          var state = layoutDragRef.current
+          layoutDragRef.current = null
+          window.removeEventListener('pointermove', onHeadPointerMove)
+          window.removeEventListener('pointerup', onHeadPointerUp)
+          window.removeEventListener('pointercancel', onHeadPointerUp)
+          if (!state || !state.moved) return
+          if (state.lastX <= leftInset + LAYOUT_EDGE_SNAP) {
+            updateLayout({ mode: 'dock', side: 'left' }, t('layout.leftAnnounce'))
+            return
+          }
+          if (state.lastX + state.width >= viewportWidth - rightInset - LAYOUT_EDGE_SNAP) {
+            updateLayout({ mode: 'dock', side: 'right' }, t('layout.rightAnnounce'))
+            return
+          }
+          updateLayout({ x: state.lastX, y: state.lastY }, '')
+        }
+
+        /** 面板内边缘拖拽调宽度（左停靠的右边缘 / 右停靠的左边缘 / 自由模式的右边缘）。 */
+        function onResizePointerDown(event) {
+          if (!event || event.button !== 0) return
+          widthDragRef.current = { startX: event.clientX, width: panelWidth, next: panelWidth, moved: false }
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          if (typeof event.stopPropagation === 'function') event.stopPropagation()
+          window.addEventListener('pointermove', onResizePointerMove)
+          window.addEventListener('pointerup', onResizePointerUp)
+          window.addEventListener('pointercancel', onResizePointerUp)
+        }
+
+        function onResizePointerMove(event) {
+          var state = widthDragRef.current
+          var panel = panelRef.current
+          if (!state || !panel) return
+          var dx = event.clientX - state.startX
+          if (!state.moved && Math.abs(dx) < 2) return
+          state.moved = true
+          // 左停靠/自由：右边缘是内边缘，往右拖变宽；右停靠：左边缘，往左拖变宽。
+          var inward = layout.mode === 'dock' && layout.side === 'right' ? -dx : dx
+          state.next = Math.round(clampNumber(state.width + inward, LAYOUT_MIN_WIDTH, panelMaxWidth))
+          panel.style.width = state.next + 'px'
+        }
+
+        function onResizePointerUp() {
+          var state = widthDragRef.current
+          widthDragRef.current = null
+          window.removeEventListener('pointermove', onResizePointerMove)
+          window.removeEventListener('pointerup', onResizePointerUp)
+          window.removeEventListener('pointercancel', onResizePointerUp)
+          if (!state || !state.moved) return
+          var panel = panelRef.current
+          if (panel) panel.style.width = ''
+          updateLayout({ width: state.next }, '')
+        }
+
+        function onResizeKeyDown(event) {
+          if (!event || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          var delta = event.key === 'ArrowRight' ? 20 : -20
+          var inward = layout.mode === 'dock' && layout.side === 'right' ? -delta : delta
+          updateLayout(
+            { width: Math.round(clampNumber(layout.width + inward, LAYOUT_MIN_WIDTH, panelMaxWidth)) },
+            '',
+          )
+        }
+
         useEffect(
           function () {
             latestStore.current = store
@@ -2705,6 +3129,7 @@
           setQuery('')
           setView('all')
           setMenuOpen(false)
+          setLayoutOpen(false)
           // 收起面板时把「找东西」的临时状态一并复位，下次打开是干净的一张列表。
           setColorFilter(null)
           setColorMenuOpen(false)
@@ -2761,6 +3186,10 @@
                   setMenuOpen(false)
                   return
                 }
+                if (layoutOpen) {
+                  setLayoutOpen(false)
+                  return
+                }
                 if (paletteId) {
                   setPaletteId(null)
                   return
@@ -2799,7 +3228,7 @@
               window.removeEventListener('keydown', onKeyDown, true)
             }
           },
-          [open, close, query, menuOpen, paletteId, colorMenuOpen, colorFilter, focusedId, cancelNoteEdit],
+          [open, close, query, menuOpen, layoutOpen, paletteId, colorMenuOpen, colorFilter, focusedId, cancelNoteEdit],
         )
 
         // 点面板外面收起。没有全屏遮罩，所以点一下别处既能让面板消失、又不会拦掉那次点击。
@@ -2818,6 +3247,12 @@
               }
               var panel = panelRef.current
               if (!panel) return
+              // 布局卡也是面板里的小浮层：点卡片外面收起，但点卡片内不收起。
+              if (layoutOpen) {
+                var card = layoutCardRef.current
+                var inCard = card && target && typeof card.contains === 'function' && card.contains(target)
+                if (!inCard) setLayoutOpen(false)
+              }
               if (target && typeof panel.contains === 'function' && panel.contains(target)) return
               close({ restoreFocus: false })
             }
@@ -2826,7 +3261,7 @@
               document.removeEventListener('pointerdown', onPointerDown, true)
             }
           },
-          [open, close, menuOpen],
+          [open, close, menuOpen, layoutOpen],
         )
 
         // Alt+Shift+N 全局开关。
@@ -3460,17 +3895,40 @@
         var headVoiceGate = voiceMicGate(t('voice.search'))
         var composerVoiceGate = voiceMicGate(t('voice.mic'))
         var searchVoiceGate = voiceMicGate(t('voice.search'))
+        // 自由模式当前该画在哪（渲染时夹回视口；停靠模式为 null）。
+        var floatBox = layout.mode === 'float' ? floatRect() : null
 
         // 收起时连面板的元素都不构造：左边缘的便签标签是唯一常驻的部分。
         var panel = !open
           ? null
           : h(
           'aside',
-          { className: 'dsn-panel', role: 'dialog', 'aria-label': t('name'), ref: panelRef },
+          {
+            className: 'dsn-panel' + (layout.mode === 'float' ? ' is-float' : ''),
+            role: 'dialog',
+            'aria-label': t('name'),
+            ref: panelRef,
+            style: floatBox
+              ? { left: floatBox.x + 'px', top: floatBox.y + 'px', width: floatBox.width + 'px', height: floatBox.height + 'px' }
+              : { width: panelWidth + 'px' },
+          },
           h(
             'div',
             { className: 'dsn-head' },
-            h('div', { className: 'dsn-heading' }, h('span', { className: 'dsn-head-icon' }, IconNote(15)), h('span', { className: 'dsn-title' }, t('name')), h('span', { className: 'dsn-sub' }, visibleCount > 0 ? visibleCount + ' ' + t('unit') : t('sub.empty'))),
+            h(
+              'div',
+              {
+                className: 'dsn-heading',
+                title: layout.mode === 'float' ? t('layout.resetTitle') : undefined,
+                onPointerDown: onHeadPointerDown,
+                onDoubleClick: function () {
+                  if (layout.mode === 'float') resetLayout()
+                },
+              },
+              h('span', { className: 'dsn-head-icon' }, IconNote(15)),
+              h('span', { className: 'dsn-title' }, t('name')),
+              h('span', { className: 'dsn-sub' }, visibleCount > 0 ? visibleCount + ' ' + t('unit') : t('sub.empty')),
+            ),
             h(
               'div',
               { className: 'dsn-head-actions' },
@@ -3596,6 +4054,58 @@
                     IconMic(14),
                     h('span', null, t('menu.voice')),
                   ),
+                  // 布局：停靠侧 / 宽度 / 自由摆放，改完立刻生效并记住。
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      role: 'menuitem',
+                      className: 'dsn-menu-item',
+                      'aria-haspopup': 'true',
+                      'aria-expanded': layoutOpen ? 'true' : 'false',
+                      onClick: function () {
+                        setMenuOpen(false)
+                        setLayoutOpen(function (prev) {
+                          return !prev
+                        })
+                      },
+                    },
+                    IconLayout(14),
+                    h('span', null, t('menu.layout')),
+                  ),
+                )
+              : null,
+            // 布局卡：内联在面板里的小浮层，不新开窗口；以后功能 4 的设置区可整体接管它。
+            layoutOpen
+              ? h(
+                  'div',
+                  { className: 'dsn-layout-card', role: 'group', 'aria-label': t('layout.title'), ref: layoutCardRef },
+                  h(
+                    'div',
+                    { className: 'dsn-layout-section' },
+                    h('span', { className: 'dsn-layout-label' }, t('layout.position')),
+                    h(
+                      'div',
+                      { className: 'dsn-layout-row' },
+                      layoutPositionButton('left', t('layout.left'), layout.mode === 'dock' && layout.side === 'left'),
+                      layoutPositionButton('right', t('layout.right'), layout.mode === 'dock' && layout.side === 'right'),
+                      layoutPositionButton('float', t('layout.float'), layout.mode === 'float'),
+                    ),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsn-layout-section' },
+                    h('span', { className: 'dsn-layout-label' }, t('layout.width')),
+                    h(
+                      'div',
+                      { className: 'dsn-layout-row' },
+                      layoutWidthButton(LAYOUT_MIN_WIDTH, t('layout.compact'), layout.width === LAYOUT_MIN_WIDTH),
+                      layoutWidthButton(LAYOUT_DEFAULT_WIDTH, t('layout.normal'), layout.width === LAYOUT_DEFAULT_WIDTH),
+                      layoutWidthButton(360, t('layout.wide'), layout.width === 360),
+                    ),
+                  ),
+                  layout.mode === 'float' ? h('p', { className: 'dsn-layout-hint' }, t('layout.hint')) : null,
+                  h('button', { type: 'button', className: 'dsn-layout-reset', onClick: resetLayout }, t('layout.reset')),
                 )
               : null,
             h('input', {
@@ -4007,14 +4517,38 @@
                       ),
               )
             : null,
+          // 内边缘拖拽条：左停靠/自由在右边缘，右停靠在左边缘（CSS 镜像）。
+          h('div', {
+            className: 'dsn-resize',
+            role: 'separator',
+            'aria-orientation': 'vertical',
+            'aria-label': t('layout.resize'),
+            'aria-valuemin': LAYOUT_MIN_WIDTH,
+            'aria-valuemax': LAYOUT_MAX_WIDTH,
+            'aria-valuenow': layout.width,
+            tabIndex: 0,
+            onPointerDown: onResizePointerDown,
+            onKeyDown: onResizeKeyDown,
+          }),
         )
 
         return h(
           'div',
-          { className: 'dsn-root', style: { '--dsn-left': leftInset + 'px' } },
-          // 展开时不再有全屏遮罩，也不渲染标签：面板本身贴在左列右侧。
+          {
+            className: 'dsn-root',
+            'data-side': layout.side,
+            'data-mode': layout.mode,
+            style: {
+              '--dsn-left': leftInset + 'px',
+              '--dsn-right': rightInset + 'px',
+              '--dsn-width': panelWidth + 'px',
+            },
+          },
+          // 展开时不再有全屏遮罩，也不渲染标签：面板本身贴在所选侧。
           open ? null : tab,
           open ? panel : null,
+          // 布局变化给读屏播报一句（拖动松手/切换停靠/重置时）。
+          h('span', { className: 'dsn-sr', role: 'status', 'aria-live': 'polite' }, layoutAnnounce),
         )
       }
 
@@ -4051,12 +4585,15 @@
       // 关键点：品牌色在 light 下是近黑、dark 下是近白，所以压在品牌色上的文字
       // 必须用「反色」bg-layer-1，直接写 #fff 在暗色主题下等于白底白字。
       var CSS = [
-        '.dsn-root{position:fixed;inset:0;z-index:2147483000;pointer-events:none;--dsn-left:0px;--dsn-fg:var(--dsw-alias-label-primary,#0f1115);--dsn-fg-2:var(--dsw-alias-label-secondary,#61666b);--dsn-surface:var(--dsw-alias-bg-layer-1,#fff);--dsn-accent:var(--dsw-alias-brand-primary,#0f1115);--dsn-on-accent:var(--dsw-alias-bg-layer-1,#fff);--dsn-line:var(--dsw-alias-border-l1,rgba(0,0,0,.1));--dsn-ring:rgba(0,0,0,.3);font-family:inherit;color:var(--dsn-fg);-webkit-font-smoothing:antialiased}',
+        '.dsn-root{position:fixed;inset:0;z-index:2147483000;pointer-events:none;--dsn-left:0px;--dsn-right:0px;--dsn-width:300px;--dsn-fg:var(--dsw-alias-label-primary,#0f1115);--dsn-fg-2:var(--dsw-alias-label-secondary,#61666b);--dsn-surface:var(--dsw-alias-bg-layer-1,#fff);--dsn-accent:var(--dsw-alias-brand-primary,#0f1115);--dsn-on-accent:var(--dsw-alias-bg-layer-1,#fff);--dsn-line:var(--dsw-alias-border-l1,rgba(0,0,0,.1));--dsn-ring:rgba(0,0,0,.3);font-family:inherit;color:var(--dsn-fg);-webkit-font-smoothing:antialiased}',
         'body[data-ds-dark-theme] .dsn-root{--dsn-ring:rgba(255,255,255,.42)}',
         '.dsn-root *,.dsn-root *::before,.dsn-root *::after{box-sizing:border-box}',
         '.dsn-tab{position:absolute;left:var(--dsn-left);top:50%;transform:translateY(-50%);pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:7px;width:32px;padding:13px 0 11px;margin:0;border:1px solid var(--dsn-line);border-left:0;border-radius:0 13px 13px 0;background:var(--dsn-surface);color:var(--dsn-fg-2);box-shadow:2px 2px 14px rgba(0,0,0,.14);cursor:pointer;font:inherit;transition:width .15s ease,color .15s ease,box-shadow .15s ease}',
         '.dsn-tab:hover{width:36px;color:var(--dsn-fg);box-shadow:2px 2px 18px rgba(0,0,0,.2)}',
         '.dsn-tab:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:2px}',
+        // 右停靠：标签/面板全部镜像（边框、圆角、阴影、滑入方向）。
+        '.dsn-root[data-side="right"] .dsn-tab{left:auto;right:var(--dsn-right);border-left:1px solid var(--dsn-line);border-right:0;border-radius:13px 0 0 13px;box-shadow:-2px 2px 14px rgba(0,0,0,.14)}',
+        '.dsn-root[data-side="right"] .dsn-tab:hover{box-shadow:-2px 2px 18px rgba(0,0,0,.2)}',
         '.dsn-tab-icon{display:grid;place-items:center;opacity:.9}',
         '.dsn-tab-text{writing-mode:vertical-rl;letter-spacing:.22em;font-size:11px;line-height:1;opacity:.9}',
         '.dsn-tab-count{display:grid;place-items:center;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--dsn-accent);color:var(--dsn-on-accent);font-size:10px;font-weight:650;line-height:1;font-variant-numeric:tabular-nums}',
@@ -4064,8 +4601,33 @@
         // 两者纯装饰，语义都在贴边标签的 title / aria-label 里，所以不参与对比度门禁。
         '.dsn-tab-draft{position:absolute;top:7px;right:6px;width:8px;height:8px;border-radius:50%;background:var(--dsn-accent);box-shadow:0 0 0 2px var(--dsn-surface)}',
         '.dsn-tab-pin{display:grid;place-items:center;opacity:.75}',
-        '.dsn-panel{position:absolute;left:var(--dsn-left);top:0;bottom:0;width:min(300px,calc(100vw - var(--dsn-left) - 24px));pointer-events:auto;display:flex;flex-direction:column;min-height:0;background:var(--dsn-surface);border-right:1px solid var(--dsn-line);box-shadow:10px 0 34px rgba(0,0,0,.18);animation:dsn-slide .12s ease-out}',
+        '.dsn-panel{position:absolute;left:var(--dsn-left);top:0;bottom:0;width:min(var(--dsn-width,300px),calc(100vw - var(--dsn-left) - var(--dsn-right) - 24px));pointer-events:auto;display:flex;flex-direction:column;min-height:0;background:var(--dsn-surface);border-right:1px solid var(--dsn-line);box-shadow:10px 0 34px rgba(0,0,0,.18);animation:dsn-slide .12s ease-out}',
         '@keyframes dsn-slide{from{transform:translateX(-12px);opacity:.4}to{transform:none;opacity:1}}',
+        '.dsn-root[data-side="right"] .dsn-panel{left:auto;right:var(--dsn-right);border-right:0;border-left:1px solid var(--dsn-line);box-shadow:-10px 0 34px rgba(0,0,0,.18);animation:dsn-slide-right .12s ease-out}',
+        '@keyframes dsn-slide-right{from{transform:translateX(12px);opacity:.4}to{transform:none;opacity:1}}',
+        // 自由摆放：面板变成一个独立的浮块（位置/宽高由内联 style 给），不再贴边。
+        '.dsn-root[data-mode="float"] .dsn-panel{right:auto;bottom:auto;border:1px solid var(--dsn-line);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.28);overflow:hidden;animation:none}',
+        '.dsn-root[data-mode="float"] .dsn-heading{cursor:grab;touch-action:none;user-select:none}',
+        '.dsn-root[data-mode="float"] .dsn-heading:active{cursor:grabbing}',
+        // 内边缘拖拽条：左停靠/自由在右侧（让开 8px 的列表滚动条），右停靠在左边缘。
+        '.dsn-resize{position:absolute;top:0;bottom:0;right:8px;width:8px;z-index:4;cursor:col-resize;touch-action:none;background:transparent;outline:none}',
+        '.dsn-root[data-side="right"] .dsn-resize{right:auto;left:0}',
+        '.dsn-resize::after{content:"";position:absolute;top:0;bottom:0;left:3px;width:2px;border-radius:1px;background:transparent;transition:background .12s ease}',
+        '.dsn-resize:hover::after,.dsn-resize:focus-visible::after{background:var(--dsn-accent);opacity:.45}',
+        // 布局卡：和「更多」菜单同一套内联浮层规矩。
+        '.dsn-layout-card{position:absolute;top:46px;right:10px;z-index:3;width:232px;padding:10px;border:1px solid var(--dsn-line);border-radius:10px;background:var(--dsn-surface);box-shadow:0 12px 30px rgba(0,0,0,.22);animation:dsn-toast-in .1s ease-out}',
+        '.dsn-layout-section + .dsn-layout-section{margin-top:9px}',
+        '.dsn-layout-label{display:block;font-size:11px;color:var(--dsn-fg-2);margin-bottom:5px}',
+        '.dsn-layout-row{display:flex;gap:4px}',
+        '.dsn-layout-btn{flex:1 1 0;min-height:28px;padding:3px 6px;border:1px solid var(--dsn-line);border-radius:7px;background:transparent;color:var(--dsn-fg);font:inherit;font-size:11.5px;cursor:pointer}',
+        '.dsn-layout-btn:hover{background:rgba(127,127,127,.14)}',
+        '.dsn-layout-btn.is-active{background:var(--dsn-accent);border-color:var(--dsn-accent);color:var(--dsn-on-accent)}',
+        '.dsn-layout-btn:focus-visible,.dsn-layout-reset:focus-visible{outline:2px solid var(--dsn-accent);outline-offset:1px}',
+        '.dsn-layout-hint{margin:8px 0 0;font-size:11px;line-height:1.45;color:var(--dsn-fg-2)}',
+        '.dsn-layout-reset{margin-top:9px;width:100%;min-height:28px;border:0;border-radius:7px;background:rgba(127,127,127,.12);color:var(--dsn-fg);font:inherit;font-size:11.5px;cursor:pointer}',
+        '.dsn-layout-reset:hover{background:rgba(127,127,127,.2)}',
+        // 读屏播报：只给 AT 看，不占布局。
+        '.dsn-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}',
         '.dsn-head{display:flex;align-items:center;gap:10px;padding:14px 10px 10px 16px}',
         '.dsn-heading{display:flex;align-items:center;gap:8px;min-width:0}',
         '.dsn-head-icon{display:grid;place-items:center;color:var(--dsn-fg-2);opacity:.95;flex:0 0 auto}',
