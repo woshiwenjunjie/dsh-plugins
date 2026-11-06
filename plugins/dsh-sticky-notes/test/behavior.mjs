@@ -359,6 +359,10 @@ const sandbox = {
       if (selector === '[data-sidebar-right-open]') {
         return rightSidebarLeft ? { getBoundingClientRect: () => ({ left: rightSidebarLeft }) } : null
       }
+      // DSH 顶部标题栏：停靠面板从它下面开始，避免盖住窗口拖拽区与右上角按钮。
+      if (selector === 'header[data-window-drag]') {
+        return { getBoundingClientRect: () => ({ bottom: 40 }) }
+      }
       // 组件里用 document.querySelector('[data-dsn-note="id"] textarea') 找正文（铅笔入口聚焦）。
       // 假 DOM 没有节点树：卡片文章节点和正文按渲染顺序各排一列，两边都是便签顺序，按下标配对即可。
       const match = /^\[data-dsn-note="([^"]+)"\] textarea$/.exec(String(selector))
@@ -527,6 +531,12 @@ function act(mutate) {
 function pressKey(patch) {
   const event = Object.assign({ preventDefault() {}, stopPropagation() {} }, patch)
   for (const listener of (windowListeners.get('keydown') || []).slice()) listener(event)
+  flush()
+}
+
+/** 派发一次 document pointerdown：用来验证「点面板外收起」的分支。 */
+function dispatchPointerDown(target) {
+  for (const listener of (documentListeners.get('pointerdown') || []).slice()) listener({ target })
   flush()
 }
 
@@ -2127,6 +2137,7 @@ check(
   [rootEl().props['data-side'], rootEl().props['data-mode'], rootEl().props.style['--dsn-width'], rootEl().props.style['--dsn-right']].join('|'),
   'left|dock|300px|0px',
 )
+check('停靠面板从 DSH 标题栏下方开始', rootEl().props.style['--dsn-top'], '40px')
 check('默认没有布局卡', Boolean(layoutCardEl()), false)
 act(() => menuButton().props.onClick({}))
 check('菜单最后一项是「布局…」', flattenText(menuItems()[5]), '布局…')
@@ -2145,6 +2156,14 @@ check('右侧栏打开时右停靠自动避让', rootEl().props.style['--dsn-rig
 rightSidebarLeft = 0
 dispatchWindow('resize', {})
 check('右侧栏关闭后右边距归零', rootEl().props.style['--dsn-right'], '0px')
+
+// 右侧栏放大成全屏：便签整体让位；退出全屏自动回来
+rightSidebarLeft = 200
+dispatchWindow('resize', {})
+check('右侧栏全屏时便签整体让位', elements.some((el) => String(el.props.className || '').indexOf('dsn-root') === 0), false)
+rightSidebarLeft = 900
+dispatchWindow('resize', {})
+check('退出全屏后便签回来', Boolean(rootEl()), true)
 
 // 宽度三档
 clickLayout('宽')
@@ -2229,6 +2248,16 @@ storage.set(
 dispatchWindow('storage', { key: 'dsh-sticky-notes:prefs:v1' })
 check('另一标签页改布局，本页跟随', rootEl().props['data-side'], 'left')
 
+// 点 DSH 顶部标题栏不算「面板外」：否则点右侧栏开关 / 全屏按钮时便签会自己收起
+function hasPanel() {
+  return elements.some((el) => el.props.className === 'dsn-panel')
+}
+check('便签面板在', hasPanel(), true)
+dispatchPointerDown({ closest: (selector) => (selector === 'header[data-window-drag]' ? {} : null) })
+check('点 DSH 标题栏不收起便签', hasPanel(), true)
+dispatchPointerDown({ closest: () => null })
+check('点面板外普通区域仍收起', hasPanel(), false)
+
 storage.delete('dsh-sticky-notes:prefs:v1')
 rightSidebarLeft = 0
 
@@ -2240,5 +2269,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 console.log(
-  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）/ 语音入口回归（面板初始收起也能请求 catalog / 编辑焦点恢复）/ 语音提示（搜索成功文案 / 记一条不弹搜索框 / 转写中显示已用时）/ 布局自由度（左右停靠 / 右侧栏避让 / 宽度档位 + 拖拽 + 键盘 / 自由摆放拖动与吸附 / 重置 / 偏好持久化与多标签页同步）',
+  'PASS  行为测试：编辑不重排 / 失焦只更新时间 / 组词不误存 / 落盘失败如实提示 / 重新编辑（铅笔入口 + 编辑中提示 / Esc 取消恢复原文 / Esc 分层 / 长文本编辑态 60vh / 失焦保存）/ 搜索跨视图 + 命中高亮 / 标签搜索（前缀 + AND）/ 颜色（默认未排 / 具名档位 + 数字通道 / 换色埋点 / 按档筛 + AND）/ 回顾条（挑选 / 展开 / 当天关闭）/ 收起还焦点 / 唤起即聚焦 / 收起态角标（草稿 + 置顶）/ 备份 round-trip / 合并撤销 / 会话绑定 / 来源会话跳转 / 草稿不丢 / 一键复制 / 拖动排序 + 键盘移动 / 剪贴板捕获（快捷档成卡 + 撤销 / 输入框不接管 / 重复不新增 / 超长拒绝 / 长内容进草稿 / 菜单档只填草稿 / 读不到与空剪贴板各有提示 / ZWJ + ZWNJ 不被清洗）/ 多标签页同步（未落盘编辑保留 / 别处新增与修改收进来 / 本页删除不复活 / 本页干净时整份采用）/ 渲染优化（记下一条只重画新卡 / 30 秒心跳不重画未变卡片）/ 输入法 Esc 放行（组词中不清搜索词 / 不收面板）/ 语音输入（入口 / 录音 → 停止 → 转写进草稿且不提交 / WAV 上送 / 权限拒绝 / 云端 provider 禁用 / Esc 取消释放麦克风）/ 语音搜索（搜索框麦克风 / 转写填 query 并立即筛 / 不写草稿 / Esc 取消 / catalog 不可用禁用）/ 语音完善（standby 兼容 / 电平与剩余秒数 / 静音自动停 / 头部语音搜索入口 / 失败重试）/ 语音入口回归（面板初始收起也能请求 catalog / 编辑焦点恢复）/ 语音提示（搜索成功文案 / 记一条不弹搜索框 / 转写中显示已用时）/ 布局自由度（左右停靠 / 右侧栏避让 / 宽度档位 + 拖拽 + 键盘 / 自由摆放拖动与吸附 / 重置 / 偏好持久化与多标签页同步）/ 与 DSH 布局共存（停靠让开标题栏 / 右侧栏放大时让位 / 点标题栏不收起）',
 )

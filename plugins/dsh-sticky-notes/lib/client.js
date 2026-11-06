@@ -1087,25 +1087,48 @@
       }
 
       /**
-       * 右侧栏（dsh-client-ui-sidebar-right）的宽度。它是 dockkit 面板：打开时容器带
-       * `data-sidebar-right-open`，宽度由用户拖拽/持久化决定（实测可能 400–700px）。
-       * 右停靠与自由摆放都要避开它，所以量「视口右边界到面板左边界」的距离。
-       * 没打开、量不到、或宽得离谱时退回 0。
+       * 右侧栏（dsh-client-ui-sidebar-right）状态：`inset` = 视口右边界到面板左边界的距离，
+       * `fullscreen` = 它已经盖住整个内容区（全屏/放大）。后者时便签必须整体让位，
+       * 不能压在右侧栏或它的关闭/全屏按钮上。
+       * 没打开、量不到、或数据离谱时都返回「关闭」。
        */
-      function measureRightInset() {
+      function measureRightSidebar() {
+        var closed = { inset: 0, fullscreen: false }
         try {
-          if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return 0
+          if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return closed
           var panel = document.querySelector('[data-sidebar-right-open]')
-          if (!panel || typeof panel.getBoundingClientRect !== 'function') return 0
+          if (!panel || typeof panel.getBoundingClientRect !== 'function') return closed
           var rect = panel.getBoundingClientRect()
           var viewport = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : 0
-          if (!viewport || !rect) return 0
-          var inset = viewport - Math.round(rect.left)
-          if (!isFinite(inset) || inset <= 0) return 0
-          if (inset > viewport * 0.7) return 0
-          return inset
+          if (!viewport || !rect) return closed
+          var left = Math.round(rect.left)
+          var inset = viewport - left
+          if (!isFinite(inset) || inset <= 0 || inset > viewport) return closed
+          // 右栏铺满内容区：面板左边已经顶到左列（或宽度接近视口）。
+          var fullscreen = left <= measureSidebarLeft() + 8 || inset >= viewport - 24
+          return { inset: fullscreen ? 0 : inset, fullscreen: fullscreen }
         } catch (error) {
-          return 0
+          return closed
+        }
+      }
+
+      /**
+       * DSH 顶部标题栏高度（`<header data-window-drag>`，本机实测 40px）。
+       * 这一条同时是窗口拖拽区与右上角「打开右侧边栏 / 全屏 / 收起」按钮所在的位置，
+       * 停靠面板必须从这里往下让开，否则会盖住这些控件（右停靠时实测会挡住按钮）。
+       * 量不到时退回 40（宁可多让 40px，也不压住窗口控件）。
+       */
+      function measureTopInset() {
+        try {
+          if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return 40
+          var header = document.querySelector('header[data-window-drag]')
+          if (!header || typeof header.getBoundingClientRect !== 'function') return 40
+          var rect = header.getBoundingClientRect()
+          var bottom = rect ? Math.round(rect.bottom) : 0
+          if (!isFinite(bottom) || bottom <= 0 || bottom > 160) return 40
+          return bottom
+        } catch (error) {
+          return 40
         }
       }
 
@@ -2037,7 +2060,13 @@
         // 左列右边界：便签栏贴着它展开，不压住会话列表。
         var [leftInset, setLeftInset] = useState(measureSidebarLeft)
         // 右侧栏占宽：右停靠/自由摆放要避开它，不盖住文件预览/终端。
-        var [rightInset, setRightInset] = useState(measureRightInset)
+        // fullscreen = 右侧栏已经铺满内容区（放大/全屏），此时便签整体让位。
+        // 用惰性初始化，避免每次渲染都去量 DOM（会造成强制布局）。
+        var [rightSidebarState, setRightSidebarState] = useState(measureRightSidebar)
+        var rightInset = rightSidebarState.inset
+        var rightSidebarFullscreen = rightSidebarState.fullscreen
+        // DSH 顶部标题栏高度：停靠面板从这里往下让开，别盖住窗口拖拽区与右上角控件。
+        var [topInset, setTopInset] = useState(measureTopInset)
         var saveTimer = useRef(0)
         var undoTimer = useRef(0)
         var panelRef = useRef(null)
@@ -2734,32 +2763,80 @@
           [open],
         )
 
-        // 右侧栏宽度会变（开关、拖分隔条、切换 push/overlay），跟着量。
-        // 右停靠与自由摆放都靠它避让，否则会盖住文件预览/终端。
+        // 右侧栏会开关、拖宽、放大成全屏，也可能换节点/重新挂载，所以：
+        //   1) 属性变化（data-sidebar-right-open）→ 立刻重算；
+        //   2) 节点宽度变化 → ResizeObserver（节点换了会重新 observe）；
+        //   3) 窗口 resize → 重算；
+        //   4) 同时量一次标题栏高度，停靠面板从它下面开始。
         useEffect(
           function () {
-            function sync() {
-              var next = measureRightInset()
-              setRightInset(function (prev) {
-                return prev === next ? prev : next
-              })
+            var observer = null
+            var observedNode = null
+            var mutation = null
+
+            function attach(node) {
+              if (node === observedNode) return
+              if (observer) {
+                observer.disconnect()
+                observer = null
+              }
+              observedNode = node
+              if (node && typeof window.ResizeObserver === 'function') {
+                observer = new window.ResizeObserver(sync)
+                observer.observe(node)
+              }
             }
+
+            function sync() {
+              var info = measureRightSidebar()
+              setRightSidebarState(function (prev) {
+                return prev.inset === info.inset && prev.fullscreen === info.fullscreen ? prev : info
+              })
+              var nextTop = measureTopInset()
+              setTopInset(function (prev) {
+                return prev === nextTop ? prev : nextTop
+              })
+              attach(
+                typeof document !== 'undefined' && typeof document.querySelector === 'function'
+                  ? document.querySelector('[data-sidebar-right-open]')
+                  : null,
+              )
+            }
+
             sync()
             window.addEventListener('resize', sync)
-            var observer = null
-            var mutation = null
-            var node =
-              typeof document !== 'undefined' && typeof document.querySelector === 'function'
-                ? document.querySelector('[data-sidebar-right-open]')
-                : null
-            if (node && typeof window.ResizeObserver === 'function') {
-              observer = new window.ResizeObserver(sync)
-              observer.observe(node)
-            }
-            // 开关只改属性、宽度没变时 ResizeObserver 不触发，所以属性变化也要听。
-            if (typeof window.MutationObserver === 'function' && typeof document !== 'undefined' && document.documentElement) {
-              mutation = new window.MutationObserver(sync)
-              mutation.observe(document.documentElement, {
+            if (typeof window.MutationObserver === 'function' && typeof document !== 'undefined' && document.body) {
+              mutation = new window.MutationObserver(function (records) {
+                for (var i = 0; i < records.length; i += 1) {
+                  var record = records[i]
+                  if (record.type === 'attributes') {
+                    sync()
+                    return
+                  }
+                  // 右侧栏是新插入/移除的节点时也要重算（属性观察不到「带着属性一起出现」）。
+                  var nodes = record.addedNodes && record.addedNodes.length ? record.addedNodes : record.removedNodes
+                  if (!nodes || !nodes.length) continue
+                  for (var j = 0; j < nodes.length; j += 1) {
+                    var node = nodes[j]
+                    if (!node || node.nodeType !== 1) continue
+                    var hit = false
+                    try {
+                      hit =
+                        (typeof node.matches === 'function' && node.matches('[data-sidebar-right-panel],[data-sidebar-right-session]')) ||
+                        (typeof node.querySelector === 'function' &&
+                          !!node.querySelector('[data-sidebar-right-panel],[data-sidebar-right-session]'))
+                    } catch (error) {
+                      hit = false
+                    }
+                    if (hit) {
+                      sync()
+                      return
+                    }
+                  }
+                }
+              })
+              mutation.observe(document.body, {
+                childList: true,
                 subtree: true,
                 attributes: true,
                 attributeFilter: ['data-sidebar-right-open'],
@@ -3254,6 +3331,13 @@
                 if (!inCard) setLayoutOpen(false)
               }
               if (target && typeof panel.contains === 'function' && panel.contains(target)) return
+              // DSH 顶部标题栏是应用 chrome（窗口拖拽 + 右侧栏开关/全屏）：停靠面板已经从它下面
+              // 让开，点它不算「点面板外」，否则点一下右侧栏开关便签会自己收起来。
+              try {
+                if (target && typeof target.closest === 'function' && target.closest('header[data-window-drag]')) return
+              } catch (error) {
+                // closest 不可用就按普通外部点击处理
+              }
               close({ restoreFocus: false })
             }
             document.addEventListener('pointerdown', onPointerDown, true)
@@ -3856,6 +3940,13 @@
             return false
           })
         }
+
+        // 右侧栏放大/全屏时，整个便签 UI 让位（开合与布局状态都保留，退出后自动回来）；
+        // 侧栏占得太满、连一列便签都放不下时同理。
+        var rightSidebarBlocked =
+          rightSidebarFullscreen ||
+          (layout.mode === 'dock' && rightInset > 0 && viewportWidth - leftInset - rightInset < LAYOUT_MIN_WIDTH + 24)
+        if (rightSidebarBlocked) return null
 
         var visibleCount = activeNotes.filter(function (note) {
           return note.text.trim().length > 0
@@ -4541,6 +4632,7 @@
             style: {
               '--dsn-left': leftInset + 'px',
               '--dsn-right': rightInset + 'px',
+              '--dsn-top': topInset + 'px',
               '--dsn-width': panelWidth + 'px',
             },
           },
@@ -4601,7 +4693,7 @@
         // 两者纯装饰，语义都在贴边标签的 title / aria-label 里，所以不参与对比度门禁。
         '.dsn-tab-draft{position:absolute;top:7px;right:6px;width:8px;height:8px;border-radius:50%;background:var(--dsn-accent);box-shadow:0 0 0 2px var(--dsn-surface)}',
         '.dsn-tab-pin{display:grid;place-items:center;opacity:.75}',
-        '.dsn-panel{position:absolute;left:var(--dsn-left);top:0;bottom:0;width:min(var(--dsn-width,300px),calc(100vw - var(--dsn-left) - var(--dsn-right) - 24px));pointer-events:auto;display:flex;flex-direction:column;min-height:0;background:var(--dsn-surface);border-right:1px solid var(--dsn-line);box-shadow:10px 0 34px rgba(0,0,0,.18);animation:dsn-slide .12s ease-out}',
+        '.dsn-panel{position:absolute;left:var(--dsn-left);top:var(--dsn-top,40px);bottom:0;width:min(var(--dsn-width,300px),calc(100vw - var(--dsn-left) - var(--dsn-right) - 24px));pointer-events:auto;display:flex;flex-direction:column;min-height:0;background:var(--dsn-surface);border-right:1px solid var(--dsn-line);box-shadow:10px 0 34px rgba(0,0,0,.18);animation:dsn-slide .12s ease-out}',
         '@keyframes dsn-slide{from{transform:translateX(-12px);opacity:.4}to{transform:none;opacity:1}}',
         '.dsn-root[data-side="right"] .dsn-panel{left:auto;right:var(--dsn-right);border-right:0;border-left:1px solid var(--dsn-line);box-shadow:-10px 0 34px rgba(0,0,0,.18);animation:dsn-slide-right .12s ease-out}',
         '@keyframes dsn-slide-right{from{transform:translateX(12px);opacity:.4}to{transform:none;opacity:1}}',

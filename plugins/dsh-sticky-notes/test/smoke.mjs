@@ -158,8 +158,12 @@ const sandbox = {
     createElement: makeElement,
     addEventListener: () => {},
     removeEventListener: () => {},
-    querySelector: (selector) =>
-      selector === '[data-dsh-sidebar-root]' ? { getBoundingClientRect: () => ({ right: SIDEBAR_RIGHT }) } : null,
+    querySelector: (selector) => {
+      if (selector === '[data-dsh-sidebar-root]') return { getBoundingClientRect: () => ({ right: SIDEBAR_RIGHT }) }
+      // DSH 顶部标题栏：停靠面板从它下面开始（本机实测 40px）。
+      if (selector === 'header[data-window-drag]') return { getBoundingClientRect: () => ({ bottom: 40 }) }
+      return null
+    },
   },
   Blob: class Blob {},
   URL: { createObjectURL: () => 'blob:fake', revokeObjectURL: () => {} },
@@ -197,6 +201,7 @@ else {
     if (css.indexOf('@keyframes dsn-slide-right') === -1) problems.push('缺少右停靠滑入动画')
     if (css.indexOf('.dsn-resize{') === -1) problems.push('缺少拖拽调宽度样式')
     if (css.indexOf('.dsn-layout-card{') === -1) problems.push('缺少布局卡样式')
+    if (css.indexOf('top:var(--dsn-top,40px)') === -1) problems.push('停靠面板没有让开 DSH 标题栏')
   }
   if (!registered) problems.push('没有注册任何 slot 组件')
   else {
@@ -251,6 +256,9 @@ else {
       }
       if (!root.props.style || root.props.style['--dsn-width'] !== '300px') {
         problems.push('根节点没有默认宽度 --dsn-width：' + JSON.stringify(root.props.style))
+      }
+      if (!root.props.style || root.props.style['--dsn-top'] !== '40px') {
+        problems.push('根节点没有把标题栏高度写进 --dsn-top：' + JSON.stringify(root.props.style))
       }
       if (root.props['data-side'] !== 'left' || root.props['data-mode'] !== 'dock') {
         problems.push('默认布局不是左停靠：' + root.props['data-side'] + '/' + root.props['data-mode'])
